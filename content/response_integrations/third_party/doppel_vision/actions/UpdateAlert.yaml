@@ -31,12 +31,11 @@ parameters:
     - taken_down
     - internal_bad_match
     - actioned
-    - no_actio
+    - archived
     type: ddl
 -   default_value: active
     description: "Entity state of Alerts \nValues : \"unclassified\", \"down\", \"\
-        parked\", \"unrelated\", \"related\", \"suspicious\", \"unknown\", \"active\"\
-        , \"resolved\""
+        parked\", \"unrelated\", \"related\", \"suspicious\", \"unknown\", \"active\"\"
     is_mandatory: true
     name: Entity_State
     optional_values:
@@ -44,9 +43,10 @@ parameters:
     - down
     - parked
     - unrelated
+    - related
     - suspicious
     - unknown
     - active
-    - resolve
     type: ddl
 script_result_name: ScriptResult
+
