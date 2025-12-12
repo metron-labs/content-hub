@@ -5,6 +5,9 @@ from ScriptResult import EXECUTION_STATE_COMPLETED, EXECUTION_STATE_FAILED
 from DoppelManager import DoppelManager
 
 
+
+
+
 @output_handler
 def main():
     siemplify, manager = DoppelManager.from_siemplify()
