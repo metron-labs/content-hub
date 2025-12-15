@@ -21,7 +21,7 @@ parameters:
 -   default_value: actioned
     description: "Queue state value of the Alerts \nValues : \"doppel_review\",\"\
         needs_confirmation\",\"monitoring\",\"taken_down\",\"internal_bad_match\"\
-        ,\"actioned\",\"no_action\""
+        ,\"actioned\",\"archived\""
     is_mandatory: true
     name: Queue_State
     optional_values:
