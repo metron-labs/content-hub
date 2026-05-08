@@ -25,7 +25,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools==65.5.0", "wheel"]
+requires = ["setuptools==78.1.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
