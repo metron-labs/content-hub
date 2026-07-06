@@ -4,7 +4,7 @@ version = "49.0"
 description = "Sync Google SecOps integrations, playbooks, and settings with a GitHub, BitBucket or GitLab instance"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    "dulwich==0.24.1",
+    "dulwich==1.2.5",
     "environmentcommon",
     "jinja2>=3.1.5",
     "packaging>=24.2",
