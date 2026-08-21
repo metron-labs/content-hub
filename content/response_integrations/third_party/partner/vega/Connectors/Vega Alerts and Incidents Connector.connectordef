@@ -1,0 +1,203 @@
+{
+  "IsEnabled": true,
+  "IsCustom": true,
+  "Integration": "Vega",
+  "DocumentationLink": "https://vega.io",
+  "Name": "Vega Alerts and Incidents Connector",
+  "Description": "Pull alerts and incidents from Vega. Dynamic List is not used. Set Run Every to 5 minutes unless the tenant requires otherwise.",
+  "Creator": null,
+  "Script": "\"\"\"\nVega Alerts and Incidents Connector.\n\nPolls Vega alerts/incidents into SOAR AlertInfo packages. Optional outbound\nsync writes closed Vega-sourced cases back to Vega.\n\"\"\"\nfrom __future__ import annotations\n\nimport json\nimport sys\n\nfrom SiemplifyConnectors import SiemplifyConnectorExecution\nfrom SiemplifyUtils import output_handler\n\n\ndef _connector_id(siemplify) -> str:\n    return str(siemplify.context.connector_info.identifier)\n\n\ndef _read_json(siemplify, identifier: str, key: str) -> dict:\n    raw = siemplify.get_connector_context_property(identifier=identifier, property_key=key)\n    if not raw:\n        return {}\n    data = json.loads(raw)\n    return data if isinstance(data, dict) else {}\n\n\ndef _write_json(siemplify, identifier: str, key: str, payload: dict) -> None:\n    siemplify.set_connector_context_property(\n        identifier=identifier,\n        property_key=key,\n        property_value=json.dumps(payload or {}),\n    )\n\n\n@output_handler\ndef main(is_test_run: bool):\n    siemplify = SiemplifyConnectorExecution()\n    from AlertPackager import create_alerts\n    from constants import (\n        CHECKPOINT_PROPERTY_KEY,\n        CONNECTOR_NAME,\n        PARAM_ACCESS_KEY,\n        PARAM_ACCESS_KEY_ID,\n        PARAM_ALERT_SEVERITIES,\n        PARAM_ALERT_STATUSES,\n        PARAM_ALERT_VERDICTS,\n        PARAM_API_ROOT,\n        PARAM_BACKFILL,\n        PARAM_ENTITIES,\n        PARAM_HAS_RELATED,\n        PARAM_INCIDENT_SEVERITIES,\n        PARAM_INCIDENT_STATUSES,\n        PARAM_INCIDENT_VERDICTS,\n        PARAM_LOOKBACK,\n        PARAM_OUTGOING_FIELDS,\n        PARAM_SYNC,\n        REMEDIATION_PROPERTY_KEY,\n        TEST_RUN_MAX_FETCH,\n    )\n    from IngestionPipeline import IngestionPipeline\n    from Remediator import SoarRemediator\n    from utils import format_user_facing_error, truthy\n    from VegaManager import VegaManager\n\n    siemplify.script_name = CONNECTOR_NAME\n    alerts = []\n    try:\n        manager = VegaManager(\n            api_root=siemplify.extract_connector_param(param_name=PARAM_API_ROOT),\n            access_key_id=siemplify.extract_connector_param(param_name=PARAM_ACCESS_KEY_ID),\n            access_key=siemplify.extract_connector_param(param_name=PARAM_ACCESS_KEY),\n            logger_instance=siemplify.LOGGER,\n        )\n        if is_test_run:\n            manager.test_connection()\n        pipeline = IngestionPipeline(\n            manager=manager,\n            entities_raw=siemplify.extract_connector_param(\n                param_name=PARAM_ENTITIES, default_value=\"Alerts,Incidents\"\n            ),\n            lookback_minutes=siemplify.extract_connector_param(\n                param_name=PARAM_LOOKBACK, default_value=\"5\"\n            ),\n            backfill_days=siemplify.extract_connector_param(\n                param_name=PARAM_BACKFILL, default_value=\"30\"\n            ),\n            alert_severities=siemplify.extract_connector_param(\n                param_name=PARAM_ALERT_SEVERITIES, default_value=\"\"\n            ),\n            alert_statuses=siemplify.extract_connector_param(\n                param_name=PARAM_ALERT_STATUSES, default_value=\"\"\n            ),\n            alert_verdicts=siemplify.extract_connector_param(\n                param_name=PARAM_ALERT_VERDICTS, default_value=\"\"\n            ),\n            has_related=siemplify.extract_connector_param(\n                param_name=PARAM_HAS_RELATED, default_value=\"Yes,No\"\n            ),\n            incident_severities=siemplify.extract_connector_param(\n                param_name=PARAM_INCIDENT_SEVERITIES, default_value=\"\"\n            ),\n            incident_statuses=siemplify.extract_connector_param(\n                param_name=PARAM_INCIDENT_STATUSES, default_value=\"\"\n            ),\n            incident_verdicts=siemplify.extract_connector_param(\n                param_name=PARAM_INCIDENT_VERDICTS, default_value=\"\"\n            ),\n            max_fetch=TEST_RUN_MAX_FETCH if is_test_run else None,\n            logger_instance=siemplify.LOGGER,\n        )\n        checkpoint = {} if is_test_run else _read_json(\n            siemplify, _connector_id(siemplify), CHECKPOINT_PROPERTY_KEY\n        )\n        summary = pipeline.run(checkpoint=checkpoint)\n        alerts = create_alerts(summary.get(\"records\") or [], siemplify, siemplify.LOGGER)\n        siemplify.LOGGER.info(\n            f\"Fetched {summary.get('fetched') or 0} Vega record(s); \"\n            f\"built {len(alerts)} alert package(s).\"\n        )\n        if not is_test_run:\n            _write_json(\n                siemplify,\n                _connector_id(siemplify),\n                CHECKPOINT_PROPERTY_KEY,\n                summary.get(\"checkpoint\") or {},\n            )\n            if truthy(\n                siemplify.extract_connector_param(\n                    param_name=PARAM_SYNC, default_value=\"true\"\n                )\n            ):\n                rem_state = _read_json(\n                    siemplify, _connector_id(siemplify), REMEDIATION_PROPERTY_KEY\n                )\n                remediator = SoarRemediator(\n                    manager=manager,\n                    siemplify=siemplify,\n                    fields_raw=siemplify.extract_connector_param(\n                        param_name=PARAM_OUTGOING_FIELDS, default_value=\"\"\n                    ),\n                    logger_instance=siemplify.LOGGER,\n                )\n                rem_result = remediator.run_once(rem_state)\n                if rem_result.get(\"message\"):\n                    siemplify.LOGGER.info(rem_result[\"message\"])\n                if rem_result.get(\"state\"):\n                    _write_json(\n                        siemplify,\n                        _connector_id(siemplify),\n                        REMEDIATION_PROPERTY_KEY,\n                        rem_result[\"state\"],\n                    )\n    except Exception as error:\n        siemplify.LOGGER.error(format_user_facing_error(error))\n        alerts = []\n    siemplify.return_package(alerts)\n\n\nif __name__ == \"__main__\":\n    is_test_run = not (len(sys.argv) < 2 or sys.argv[1] == \"True\")\n    main(is_test_run)\n",
+  "Version": 1,
+  "MappingRules": [],
+  "ProductToVisualFamilyRecords": [],
+  "SimulationUseCases": {
+    "CasesForUseCase": [],
+    "UseCaseName": null
+  },
+  "Parameters": [
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": true,
+      "IsAdvanced": false,
+      "DefaultValue": "https://api.vega.io",
+      "Name": "API Root",
+      "Type": 6,
+      "Mode": 2,
+      "Description": "The Base URL of the Vega API."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": true,
+      "IsAdvanced": false,
+      "DefaultValue": "",
+      "Name": "Access Key ID",
+      "Type": 3,
+      "Mode": 2,
+      "Description": "Vega Access Key ID (X-Vega-Key-Id header)."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": true,
+      "IsAdvanced": false,
+      "DefaultValue": "",
+      "Name": "Access Key",
+      "Type": 3,
+      "Mode": 2,
+      "Description": "Vega Access Key used with login_machine."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": true,
+      "IsAdvanced": false,
+      "DefaultValue": "Alerts,Incidents",
+      "Name": "Vega Entities to Fetch",
+      "Type": 14,
+      "Mode": 2,
+      "Description": "Possible Values: Alerts, Incidents. At least one is required."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": true,
+      "IsAdvanced": false,
+      "DefaultValue": "5",
+      "Name": "Fetch Lookback (Minutes)",
+      "Type": 2,
+      "Mode": 2,
+      "Description": "Minutes to shift the query window backwards to catch late-indexed records. Valid range 1-60."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": true,
+      "IsAdvanced": false,
+      "DefaultValue": "30",
+      "Name": "Max Days Backwards",
+      "Type": 2,
+      "Mode": 2,
+      "Description": "Days to backfill on the first run only (0-365; 0 starts from today). Later runs continue from the checkpoint."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": false,
+      "IsAdvanced": true,
+      "DefaultValue": "LOW,MEDIUM,HIGH,CRITICAL",
+      "Name": "Alert Severities to Fetch",
+      "Type": 14,
+      "Mode": 2,
+      "Description": "Possible Values: LOW, MEDIUM, HIGH, CRITICAL. Empty = all. Unknown values are ignored."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": false,
+      "IsAdvanced": true,
+      "DefaultValue": "OPEN,IN PROGRESS,PEER REVIEW,RESOLVED",
+      "Name": "Alert Statuses to Fetch",
+      "Type": 14,
+      "Mode": 2,
+      "Description": "Possible Values: OPEN, IN PROGRESS, PEER REVIEW, RESOLVED. Empty = all. Unknown values are ignored."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": false,
+      "IsAdvanced": true,
+      "DefaultValue": "MALICIOUS,SUSPICIOUS,BENIGN,INCONCLUSIVE,NA",
+      "Name": "Alert Verdicts to Fetch",
+      "Type": 14,
+      "Mode": 2,
+      "Description": "Possible Values: MALICIOUS, SUSPICIOUS, BENIGN, INCONCLUSIVE, NA. Empty = all. Unknown values are ignored."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": true,
+      "IsAdvanced": false,
+      "DefaultValue": "Yes,No",
+      "Name": "Has Related Incidents",
+      "Type": 14,
+      "Mode": 2,
+      "Description": "Possible Values: Yes, No. Select both to fetch all alerts. At least one is required."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": false,
+      "IsAdvanced": true,
+      "DefaultValue": "LOW,MEDIUM,HIGH,CRITICAL",
+      "Name": "Incident Severities to Fetch",
+      "Type": 14,
+      "Mode": 2,
+      "Description": "Possible Values: LOW, MEDIUM, HIGH, CRITICAL. Empty = all. Unknown values are ignored."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": false,
+      "IsAdvanced": true,
+      "DefaultValue": "NEW,INVESTIGATING,ON HOLD,EXTERNAL ESCALATION,RESOLVED,REOPENED,REVIEW RECOMMENDED,RESPONSE REQUIRED,UNDER REVIEW",
+      "Name": "Incident Statuses to Fetch",
+      "Type": 14,
+      "Mode": 2,
+      "Description": "Possible Values: NEW, INVESTIGATING, ON HOLD, EXTERNAL ESCALATION, RESOLVED, REOPENED, REVIEW RECOMMENDED, RESPONSE REQUIRED, UNDER REVIEW. Empty = all. Unknown values are ignored."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": false,
+      "IsAdvanced": true,
+      "DefaultValue": "MALICIOUS,SUSPICIOUS,BENIGN,INCONCLUSIVE,NA",
+      "Name": "Incident Verdicts to Fetch",
+      "Type": 14,
+      "Mode": 2,
+      "Description": "Possible Values: MALICIOUS, SUSPICIOUS, BENIGN, INCONCLUSIVE, NA. Empty = all. Unknown values are ignored."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": false,
+      "IsAdvanced": true,
+      "DefaultValue": "true",
+      "Name": "Sync Case Updates to Vega",
+      "Type": 0,
+      "Mode": 2,
+      "Description": "When true, push selected fields from closed Vega-sourced cases back to Vega."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": false,
+      "IsAdvanced": true,
+      "DefaultValue": "Status,Severity,Verdict,Verdict Reasoning,Comments",
+      "Name": "Outgoing Fields to Sync",
+      "Type": 14,
+      "Mode": 2,
+      "Description": "Possible Values: Status, Severity, Verdict, Verdict Reasoning, Comments. Empty = all listed fields."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": true,
+      "IsAdvanced": false,
+      "DefaultValue": "product",
+      "Name": "DeviceProductField",
+      "Type": 2,
+      "Mode": 0,
+      "Description": "Platform Product Field Name (required by SecOps)."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": true,
+      "IsAdvanced": false,
+      "DefaultValue": "event_type",
+      "Name": "EventClassId",
+      "Type": 2,
+      "Mode": 0,
+      "Description": "Platform Event Field Name (required by SecOps)."
+    },
+    {
+      "ConnectorDefinitionId": 0,
+      "IsMandatory": true,
+      "IsAdvanced": false,
+      "DefaultValue": "930",
+      "Name": "PythonProcessTimeout",
+      "Type": 2,
+      "Mode": 0,
+      "Description": "Max seconds for one connector run before SecOps kills the Python process. This is not the schedule. Use Run Every to control how often a run starts. Raise this if a full time-window fetch is killed before it finishes."
+    }
+  ],
+  "Rules": [],
+  "IsConnectorRulesSupported": false,
+  "IsSystem": false,
+  "PythonVersion": "None"
+}

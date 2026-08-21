@@ -1,0 +1,88 @@
+{
+  "Name": "Update Alert",
+  "Description": "Update Vega alert status, severity, verdict, verdict reasoning, assignees, and/or comment.",
+  "Script": "from SiemplifyAction import SiemplifyAction\nfrom SiemplifyUtils import output_handler\nfrom ScriptResult import EXECUTION_STATE_COMPLETED, EXECUTION_STATE_FAILED\n\n\ndef _current_vega_id(siemplify):\n    try:\n        alert = siemplify.current_alert\n        events = getattr(alert, \"security_events\", None) or getattr(alert, \"events\", None) or []\n        for event in events:\n            additional = getattr(event, \"additional_properties\", None) or {}\n            value = additional.get(\"vega_id\") if isinstance(additional, dict) else None\n            if value:\n                return str(value)\n    except Exception:\n        return \"\"\n    return \"\"\n\n\n@output_handler\ndef main():\n    siemplify = SiemplifyAction()\n    from constants import (\n        INTEGRATION_NAME,\n        PARAM_ACCESS_KEY,\n        PARAM_ACCESS_KEY_ID,\n        PARAM_API_ROOT,\n        UPDATE_ALERT_SCRIPT_NAME,\n    )\n    from utils import format_user_facing_error, parse_csv_list, to_graphql_enum\n    from VegaManager import VegaManager\n\n    siemplify.script_name = UPDATE_ALERT_SCRIPT_NAME\n    alert_ids = parse_csv_list(siemplify.extract_action_param(\"Alert IDs\", default_value=\"\"))\n    if not alert_ids:\n        current = _current_vega_id(siemplify)\n        if current:\n            alert_ids = [current]\n    payload = {\"alertIds\": alert_ids}\n    status = str(siemplify.extract_action_param(\"Status\", default_value=\"\") or \"\").strip()\n    verdict = str(siemplify.extract_action_param(\"Verdict\", default_value=\"\") or \"\").strip()\n    severity = str(siemplify.extract_action_param(\"Severity\", default_value=\"\") or \"\").strip()\n    reasoning = str(siemplify.extract_action_param(\"Verdict Reasoning\", default_value=\"\") or \"\").strip()\n    comment = str(siemplify.extract_action_param(\"Comment\", default_value=\"\") or \"\").strip()\n    assignees = parse_csv_list(siemplify.extract_action_param(\"Assignees\", default_value=\"\"))\n    if status:\n        payload[\"status\"] = to_graphql_enum(status)\n    if verdict:\n        payload[\"verdict\"] = verdict\n    if severity:\n        payload[\"severity\"] = severity\n    if reasoning:\n        payload[\"verdictReasoning\"] = reasoning\n    if comment:\n        payload[\"comment\"] = comment\n    if assignees:\n        payload[\"assignees\"] = assignees\n    try:\n        if not alert_ids:\n            raise ValueError(\"Alert IDs are required.\")\n        manager = VegaManager(\n            api_root=siemplify.extract_configuration_param(INTEGRATION_NAME, PARAM_API_ROOT),\n            access_key_id=siemplify.extract_configuration_param(INTEGRATION_NAME, PARAM_ACCESS_KEY_ID),\n            access_key=siemplify.extract_configuration_param(INTEGRATION_NAME, PARAM_ACCESS_KEY),\n            logger_instance=siemplify.LOGGER,\n        )\n        result = manager.update_alerts(payload)\n        siemplify.result.add_result_json(result)\n        siemplify.end(\n            f\"Updated {len(alert_ids)} Vega alert(s).\",\n            True,\n            EXECUTION_STATE_COMPLETED,\n        )\n    except Exception as error:\n        message = f'Error executing action \"Update Alert\". Reason: {format_user_facing_error(error)}'\n        siemplify.LOGGER.error(message)\n        siemplify.end(message, False, EXECUTION_STATE_FAILED)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+  "IntegrationIdentifier": "Vega",
+  "ScriptResultName": "ScriptResult",
+  "DynamicResultsMetadata": [
+    {
+      "ResultName": "JsonResult",
+      "ResultExample": "{}",
+      "ShowResult": true
+    }
+  ],
+  "Creator": null,
+  "IsEnabled": true,
+  "IsCustom": true,
+  "AiGenerated": false,
+  "IsSystem": false,
+  "Version": 1.0,
+  "TimeoutSeconds": 600,
+  "IsAsync": false,
+  "AsyncPollingIntervalInSeconds": 3600,
+  "TotalIntervalTimeoutForAsyncInSeconds": 86400,
+  "Parameters": [
+    {
+      "Name": "Alert IDs",
+      "Type": 2,
+      "IsMandatory": false,
+      "Description": "Comma-separated Vega alert IDs. Optional when running on a Vega alert.",
+      "DefaultValue": ""
+    },
+    {
+      "Name": "Status",
+      "Type": 2,
+      "IsMandatory": false,
+      "Description": "Possible Values: OPEN, IN PROGRESS, PEER REVIEW, RESOLVED.",
+      "DefaultValue": ""
+    },
+    {
+      "Name": "Verdict",
+      "Type": 2,
+      "IsMandatory": false,
+      "Description": "Possible Values: MALICIOUS, SUSPICIOUS, BENIGN, INCONCLUSIVE, NA.",
+      "DefaultValue": ""
+    },
+    {
+      "Name": "Severity",
+      "Type": 2,
+      "IsMandatory": false,
+      "Description": "Possible Values: LOW, MEDIUM, HIGH, CRITICAL.",
+      "DefaultValue": ""
+    },
+    {
+      "Name": "Verdict Reasoning",
+      "Type": 2,
+      "IsMandatory": false,
+      "Description": "Verdict reasoning text.",
+      "DefaultValue": ""
+    },
+    {
+      "Name": "Comment",
+      "Type": 2,
+      "IsMandatory": false,
+      "Description": "Comment to add on the Vega alert.",
+      "DefaultValue": ""
+    },
+    {
+      "Name": "Assignees",
+      "Type": 2,
+      "IsMandatory": false,
+      "Description": "Comma-separated Vega user IDs.",
+      "DefaultValue": ""
+    }
+  ],
+  "DefaultResultValue": "",
+  "PythonVersion": "None",
+  "ActionType": 1,
+  "SimulationData": {
+    "Entities": null
+  },
+  "SimulationDataJson": null,
+  "AICategories": [],
+  "OutcomeCategories": [],
+  "AIDescription": null,
+  "AiShortDescription": null,
+  "ParametersDescription": null,
+  "EntityTypes": []
+}

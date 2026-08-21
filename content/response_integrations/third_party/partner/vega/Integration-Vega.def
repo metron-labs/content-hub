@@ -1,0 +1,128 @@
+{
+  "IsAvailableForCommunity": false,
+  "Identifier": "Vega",
+  "ShouldInstalledInSystem": false,
+  "Version": 2.0,
+  "DisplayName": "Vega",
+  "Description": "Connect Vega alerts and incidents to Google SecOps. This integration is owned by the \"Vega\". Support Contact: support@vega.io.",
+  "ImageBase64": "iVBORw0KGgoAAAANSUhEUgAAAUAAAABQCAYAAABoMayFAAAA6ElEQVR42u3UMQEAAAQAQTnUVFoLQhjdcAV++MjqAfgoRAAMEMAAAQwQwAABDBDAAAEMEMAAAQwQwAABDBDAAAEMEMAAAQwQwAABDBDAAAEMEMAAAQwQwAABDBDAAAEMEMAAAQwQwAABAxQCMEAAAwQwQAADBDBAAAMEMEAAAwQwQAADBDBAAAMEMEAAAwQwQAADBDBAAAMEMEAAAwQwQAADBDBAAAMEMEAAAwQwQAADBAwQwAABDBDAAAEMEMAAAQwQwAABDBDAAAEMEMAAAQwQwAABDBDAAAEMEMAAAQwQwAABDBDgZgGoOl5c4QmjkAAAAABJRU5ErkJggg==",
+  "SvgImage": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 21 23\"><path fill=\"#1a73e8\" d=\"M10.5,2.1L18.8,21h-2.4L10.5,6.6,4.6,21H2.2L10.5,2.1Z\"/></svg>",
+  "IsCustom": true,
+  "PythonVersion": 3,
+  "IntegrationProperties": [
+    {
+      "IntegrationIdentifier": "Vega",
+      "PropertyName": "API Root",
+      "PropertyDescription": "The Base URL of the Vega API.",
+      "PropertyDisplayName": "API Root",
+      "PropertyType": 2,
+      "IsMandatory": true,
+      "Value": "https://api.vega.io",
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    },
+    {
+      "IntegrationIdentifier": "Vega",
+      "PropertyName": "Access Key ID",
+      "PropertyDescription": "The Access Key ID used to authenticate with the Vega API (X-Vega-Key-Id).",
+      "PropertyDisplayName": "Access Key ID",
+      "PropertyType": 3,
+      "IsMandatory": true,
+      "Value": null,
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    },
+    {
+      "IntegrationIdentifier": "Vega",
+      "PropertyName": "Access Key",
+      "PropertyDescription": "The Access Key used to authenticate with the Vega API.",
+      "PropertyDisplayName": "Access Key",
+      "PropertyType": 3,
+      "IsMandatory": true,
+      "Value": null,
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    }
+  ],
+  "IntegrationSupportedActions": [
+    {
+      "Name": "Ping",
+      "Description": "Test connectivity to the Vega API.",
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    },
+    {
+      "Name": "Get Alert Events",
+      "Description": "Fetch aggregated events for a Vega alert.",
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    },
+    {
+      "Name": "Set Detections State",
+      "Description": "Set ENABLED, DISABLED, or TEST_MODE for Vega detections.",
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    },
+    {
+      "Name": "Update Detections",
+      "Description": "Update Vega detection severity, state, and/or tags.",
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    },
+    {
+      "Name": "Update Alert",
+      "Description": "Update Vega alert status, severity, verdict, assignees, and/or comment.",
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    },
+    {
+      "Name": "Update Incident",
+      "Description": "Update Vega incident status, severity, verdict, assignees, and/or comment.",
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    },
+    {
+      "Name": "Get Incident Timeline",
+      "Description": "Fetch the Vega incident timeline for an incident ID.",
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    },
+    {
+      "Name": "Get Incident Details",
+      "Description": "Fetch Vega incident comments, recommended actions, assets, and observables.",
+      "Id": 0,
+      "CreationTimeUnixTimeInMs": 0,
+      "ModificationTimeUnixTimeInMs": 0
+    }
+  ],
+  "Categories": [
+    "SOAR",
+    "Security"
+  ],
+  "HasConnectors": false,
+  "DocumentationLink": "https://vega.io",
+  "IsCertified": false,
+  "UploaderFullName": "Vega",
+  "PublishComment": null,
+  "UploaderEmail": "support@vega.io",
+  "UploaderImageBase64": "",
+  "UploaderProfileLink": null,
+  "MinimumSystemVersion": 0.0,
+  "ProductionIntegrationIdentifier": null,
+  "Type": 0,
+  "Internal": false,
+  "GoogleSecOpsProduct": false,
+  "Id": 0,
+  "CreationTimeUnixTimeInMs": 0,
+  "ModificationTimeUnixTimeInMs": 0
+}
