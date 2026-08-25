@@ -1,0 +1,150 @@
+name: Vega Alerts and Incidents Connector
+parameters:
+-   name: API Root
+    default_value: https://api.vega.io
+    type: url
+    description: The Base URL of the Vega API.
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Access Key ID
+    default_value: ''
+    type: password
+    description: Vega Access Key ID (X-Vega-Key-Id header).
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Access Key
+    default_value: ''
+    type: password
+    description: Vega Access Key used with login_machine.
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Vega Entities to Fetch
+    default_value: Alerts,Incidents
+    type: string
+    description: 'Possible Values: Alerts, Incidents. At least one is required.'
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Fetch Lookback (Minutes)
+    default_value: '5'
+    type: string
+    description: Minutes to shift the query window backwards to catch late-indexed
+        records. Valid range 1-60.
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Max Days Backwards
+    default_value: '30'
+    type: string
+    description: Days to backfill on the first run only (0-365; 0 starts from today).
+        Later runs continue from the checkpoint.
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Alert Severities to Fetch
+    default_value: LOW,MEDIUM,HIGH,CRITICAL
+    type: string
+    description: 'Possible Values: LOW, MEDIUM, HIGH, CRITICAL. Empty = all. Unknown
+        values are ignored.'
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: Alert Statuses to Fetch
+    default_value: OPEN,IN PROGRESS,PEER REVIEW,RESOLVED
+    type: string
+    description: 'Possible Values: OPEN, IN PROGRESS, PEER REVIEW, RESOLVED. Empty
+        = all. Unknown values are ignored.'
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: Alert Verdicts to Fetch
+    default_value: MALICIOUS,SUSPICIOUS,BENIGN,INCONCLUSIVE,NA
+    type: string
+    description: 'Possible Values: MALICIOUS, SUSPICIOUS, BENIGN, INCONCLUSIVE, NA.
+        Empty = all. Unknown values are ignored.'
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: Has Related Incidents
+    default_value: Yes,No
+    type: string
+    description: 'Possible Values: Yes, No. Select both to fetch all alerts. At least
+        one is required.'
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Incident Severities to Fetch
+    default_value: LOW,MEDIUM,HIGH,CRITICAL
+    type: string
+    description: 'Possible Values: LOW, MEDIUM, HIGH, CRITICAL. Empty = all. Unknown
+        values are ignored.'
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: Incident Statuses to Fetch
+    default_value: NEW,INVESTIGATING,ON HOLD,EXTERNAL ESCALATION,RESOLVED,REOPENED,REVIEW
+        RECOMMENDED,RESPONSE REQUIRED,UNDER REVIEW
+    type: string
+    description: 'Possible Values: NEW, INVESTIGATING, ON HOLD, EXTERNAL ESCALATION,
+        RESOLVED, REOPENED, REVIEW RECOMMENDED, RESPONSE REQUIRED, UNDER REVIEW. Empty
+        = all. Unknown values are ignored.'
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: Incident Verdicts to Fetch
+    default_value: MALICIOUS,SUSPICIOUS,BENIGN,INCONCLUSIVE,NA
+    type: string
+    description: 'Possible Values: MALICIOUS, SUSPICIOUS, BENIGN, INCONCLUSIVE, NA.
+        Empty = all. Unknown values are ignored.'
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: Sync Case Updates to Vega
+    default_value: 'true'
+    type: boolean
+    description: When true, push selected fields from closed Vega-sourced cases back
+        to Vega.
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: Outgoing Fields to Sync
+    default_value: Status,Severity,Verdict,Verdict Reasoning,Comments
+    type: string
+    description: 'Possible Values: Status, Severity, Verdict, Verdict Reasoning, Comments.
+        Empty = all listed fields.'
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: DeviceProductField
+    default_value: product
+    type: string
+    description: Platform Product Field Name (required by SecOps).
+    is_mandatory: true
+    is_advanced: false
+    mode: regular
+-   name: EventClassId
+    default_value: event_type
+    type: string
+    description: Platform Event Field Name (required by SecOps).
+    is_mandatory: true
+    is_advanced: false
+    mode: regular
+-   name: PythonProcessTimeout
+    default_value: '930'
+    type: string
+    description: Max seconds for one connector run before SecOps kills the Python
+        process. This is not the schedule. Use Run Every to control how often a run
+        starts. Raise this if a full time-window fetch is killed before it finishes.
+    is_mandatory: true
+    is_advanced: false
+    mode: regular
+description: Pull alerts and incidents from Vega. Dynamic List is not used. Set Run
+    Every to 5 minutes unless the tenant requires otherwise.
+integration: Vega
+documentation_link: https://vega.io/
+rules: []
+is_connector_rules_supported: false
+creator: admin

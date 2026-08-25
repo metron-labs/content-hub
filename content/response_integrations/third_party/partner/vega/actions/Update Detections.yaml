@@ -1,0 +1,31 @@
+name: Update Detections
+description: Update severity, state, and/or tags for Vega detections.
+integration_identifier: Vega
+parameters:
+-   name: Detection IDs
+    default_value: ''
+    type: playbook_name
+    description: Comma-separated Vega detection IDs.
+    is_mandatory: true
+-   name: Severity
+    default_value: ''
+    type: playbook_name
+    description: 'Possible Values: LOW, MEDIUM, HIGH, CRITICAL.'
+    is_mandatory: false
+-   name: State
+    default_value: ''
+    type: playbook_name
+    description: 'Possible Values: ENABLED, DISABLED, TEST_MODE.'
+    is_mandatory: false
+-   name: Tags
+    default_value: ''
+    type: playbook_name
+    description: Comma-separated tags.
+    is_mandatory: false
+dynamic_results_metadata:
+-   result_example_path: null
+    result_name: JsonResult
+    show_result: true
+default_result_value: ''
+creator: admin
+script_result_name: ScriptResult
