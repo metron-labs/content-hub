@@ -1,4 +1,6 @@
--   description: ''
+-   description: Updated Get Incidents, Get Alert Events, and Get Incident Timeline
+        queries, included Vega IDs in case names, and fetched all paginated alert
+        and timeline events.
     version: 2.0
     item_name: Vega
     item_type: Integration

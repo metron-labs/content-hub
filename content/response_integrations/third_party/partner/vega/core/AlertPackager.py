@@ -49,7 +49,8 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
         alert.ticket_id = ticket_id
         # Case Name settings typically use Rule Generator and/or Device Product,
         # not only alert.name. Keep all three aligned so the case title is
-        # "Vega Alert - <name>" / "Vega Incident - <name>".
+        # "Vega Alert - <vegaAlertId> - <name>" /
+        # "Vega Incident - <vegaUniqueIncidentId> - <name>".
         alert.rule_generator = display_name
         alert.device_event_class_id = identifier
         alert.name = display_name

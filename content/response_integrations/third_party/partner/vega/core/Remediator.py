@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .constants import ENTITY_TYPE_ALERT, ENTITY_TYPE_INCIDENT, VENDOR_NAME
-from .utils import resolve_outgoing_fields, safe_log
+from .utils import safe_log
 
 
 def _event_vega_id(event: dict) -> str:
@@ -40,31 +40,20 @@ def extract_sync_targets(case_payload: dict) -> list[dict]:
     return targets
 
 
-def build_alert_sync_input(alert_ids: list[str], fields: list[str], comment: str) -> dict:
-    payload = {"alertIds": alert_ids}
-    if "Status" in fields:
-        payload["status"] = "RESOLVED"
-    if "Comments" in fields and comment:
-        payload["comment"] = comment
-    return payload
+def build_alert_sync_input(alert_ids: list[str]) -> dict:
+    return {"alertIds": alert_ids, "status": "RESOLVED"}
 
 
-def build_incident_sync_input(incident_ids: list[str], fields: list[str], comment: str) -> dict:
-    payload = {"incidentIds": incident_ids}
-    if "Status" in fields:
-        payload["status"] = "RESOLVED"
-    if "Comments" in fields and comment:
-        payload["comment"] = comment
-    return payload
+def build_incident_sync_input(incident_ids: list[str]) -> dict:
+    return {"incidentIds": incident_ids, "status": "RESOLVED"}
 
 
 class SoarRemediator:
-    """Push closed Vega-sourced SOAR cases to Vega when sync is enabled."""
+    """Close matching Vega alerts or incidents when SOAR cases close."""
 
-    def __init__(self, manager, siemplify, fields_raw: str, logger_instance=None) -> None:
+    def __init__(self, manager, siemplify, logger_instance=None) -> None:
         self.manager = manager
         self.siemplify = siemplify
-        self.fields = resolve_outgoing_fields(fields_raw)
         self.logger = logger_instance
 
     def run_once(self, state: dict) -> dict:
@@ -98,7 +87,6 @@ class SoarRemediator:
             entity_type = ENTITY_TYPE_ALERT
             # ticket_id is Vega:<id>; entity type is recovered from case events when possible.
             getter = getattr(self.siemplify, "get_cases_by_ticket_id", None)
-            comment = ""
             if callable(getter):
                 try:
                     payload = getter(ticket_id) or {}
@@ -106,26 +94,14 @@ class SoarRemediator:
                     if targets:
                         entity_type = targets[0]["entity_type"]
                         identifier = targets[0]["id"]
-                    wall = payload.get("wall") or payload.get("comments") or []
-                    if wall and isinstance(wall, list):
-                        last = wall[-1]
-                        if isinstance(last, dict):
-                            comment = str(last.get("text") or last.get("comment") or "")
-                        else:
-                            comment = str(last)
                 except Exception as exc:
                     safe_log(self.logger, "warning", "Case fetch failed for %s: %s", ticket_id, exc)
             try:
                 if entity_type == ENTITY_TYPE_INCIDENT:
-                    payload = build_incident_sync_input([identifier], self.fields, comment)
-                    if len(payload) > 1:
-                        self.manager.update_incidents(payload)
-                        synced += 1
+                    self.manager.update_incidents(build_incident_sync_input([identifier]))
                 else:
-                    payload = build_alert_sync_input([identifier], self.fields, comment)
-                    if len(payload) > 1:
-                        self.manager.update_alerts(payload)
-                        synced += 1
+                    self.manager.update_alerts(build_alert_sync_input([identifier]))
+                synced += 1
                 processed.add(identifier)
             except Exception as exc:
                 safe_log(

@@ -101,9 +101,15 @@ class IngestionPipeline:
         if not identifier:
             return record
         try:
-            timeline = self.manager.get_incident_timeline(identifier)
+            events = self.manager.get_all_incident_timeline(identifier)
             record = dict(record)
-            record["timeline"] = timeline.get("events") or []
+            record["timeline"] = events
+            self._log(
+                "info",
+                "Fetched %s timeline event(s) for Vega incident %s.",
+                len(events),
+                identifier,
+            )
         except Exception as exc:
             self._log(
                 "warning",
@@ -121,6 +127,13 @@ class IngestionPipeline:
             events = self.manager.get_all_alert_events(identifier)
             record = dict(record)
             record["alert_events"] = events
+            self._log(
+                "info",
+                "Fetched %s event(s) for Vega alert %s (eventCount=%s).",
+                len(events),
+                identifier,
+                record.get("eventCount"),
+            )
         except Exception as exc:
             self._log(
                 "warning",

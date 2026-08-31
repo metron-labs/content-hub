@@ -5,12 +5,13 @@ Does not import the SecOps SDK.
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from .constants import (
+    ALERT_EVENTS_MAX_FETCH,
     ALERT_EVENTS_PAGE_SIZE,
-    DEFAULT_API_ROOT,
     DEFAULT_HTTP_TIMEOUT,
     GET_ALERT_EVENTS_QUERY,
     GET_ALERTS_QUERY,
@@ -20,14 +21,18 @@ from .constants import (
     LOGIN_PATH,
     MSG_BAD_REQUEST,
     MSG_FORBIDDEN,
+    MSG_INVALID_ACCESS_KEY,
+    MSG_INVALID_ACCESS_KEY_ID,
+    MSG_INVALID_API_ROOT,
     MSG_NOT_FOUND,
     MSG_RATE_LIMIT,
     MSG_SERVER_ERROR,
-    MSG_UNAUTHORIZED,
     QUERY_PATH,
     SERVER_ERROR_RETRIES,
     SERVER_ERROR_WAIT_SECONDS,
     SET_DETECTIONS_STATE_MUTATION,
+    TIMELINE_MAX_FETCH,
+    TIMELINE_PAGE_SIZE,
     UPDATE_ALERTS_MUTATION,
     UPDATE_DETECTIONS_MUTATION,
     UPDATE_INCIDENTS_MUTATION,
@@ -40,11 +45,46 @@ from .exceptions import (
     VegaRateLimitException,
     VegaTimeoutException,
     VegaUnauthorizedException,
+    VegaValidationException,
 )
 from .rate_limit import RateLimitController
-from .utils import normalize_api_root, require_secret, safe_log
+from .utils import classify_credential_error, normalize_api_root, require_secret, safe_log
 
 logger = logging.getLogger(__name__)
+
+
+def parse_alert_events_results(results: Any) -> list[dict]:
+    """Normalize getAlertsEvents `results` (list, dict, or JSON string) into event dicts."""
+    if results is None or results == "":
+        return []
+    if isinstance(results, str):
+        text = results.strip()
+        if not text:
+            return []
+        try:
+            results = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    if isinstance(results, dict):
+        for key in ("results", "events", "items", "data", "rows"):
+            nested = results.get(key)
+            if isinstance(nested, list):
+                results = nested
+                break
+        else:
+            results = [results]
+    if not isinstance(results, list):
+        return []
+    parsed: list[dict] = []
+    for item in results:
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(item, dict):
+            parsed.append(item)
+    return parsed
 
 
 def _requests():
@@ -68,7 +108,7 @@ class VegaManager:
         rate_limiter: Optional[RateLimitController] = None,
         sleeper=None,
     ) -> None:
-        self.api_root = normalize_api_root(api_root or DEFAULT_API_ROOT)
+        self.api_root = normalize_api_root(api_root)
         self.access_key_id = require_secret(access_key_id, "Access Key ID")
         self.access_key = require_secret(access_key, "Access Key")
         self.verify_ssl = bool(verify_ssl)
@@ -89,11 +129,41 @@ class VegaManager:
     def _url(self, path: str) -> str:
         return f"{self.api_root}{path}"
 
-    def _raise_http(self, status: int) -> None:
+    def _response_error_text(self, response) -> str:
+        try:
+            payload = response.json()
+        except Exception:
+            return str(getattr(response, "text", "") or "")
+        if isinstance(payload, dict):
+            error = payload.get("error") or payload.get("errors") or payload.get("message")
+            if isinstance(error, dict):
+                return str(error.get("message") or error.get("code") or error)
+            if isinstance(error, list) and error:
+                first = error[0]
+                if isinstance(first, dict):
+                    return str(first.get("message") or first.get("code") or first)
+                return str(first)
+            if error:
+                return str(error)
+            return str(payload)
+        return str(payload)
+
+    def _raise_http(self, response, path: str = "") -> None:
+        status = response.status_code
+        classified = classify_credential_error(self._response_error_text(response))
+        if classified:
+            raise VegaUnauthorizedException(classified)
+        if path == LOGIN_PATH:
+            if status == 400:
+                raise VegaUnauthorizedException(MSG_INVALID_ACCESS_KEY_ID)
+            if status == 404:
+                raise VegaValidationException(MSG_INVALID_API_ROOT)
+            if status in (401, 403) or status >= 500:
+                raise VegaUnauthorizedException(MSG_INVALID_ACCESS_KEY)
         if status == 400:
             raise VegaBadRequestException(MSG_BAD_REQUEST)
         if status == 401:
-            raise VegaUnauthorizedException(MSG_UNAUTHORIZED)
+            raise VegaUnauthorizedException(MSG_INVALID_ACCESS_KEY_ID)
         if status == 403:
             raise VegaForbiddenException(MSG_FORBIDDEN)
         if status == 404:
@@ -111,11 +181,11 @@ class VegaManager:
         try:
             return self.session.request(method, self._url(path), **kwargs)
         except requests.Timeout as exc:
-            raise VegaTimeoutException("Connection to Vega timed out.") from exc
+            raise VegaTimeoutException(MSG_INVALID_API_ROOT) from exc
+        except requests.exceptions.SSLError as exc:
+            raise VegaValidationException(MSG_INVALID_API_ROOT) from exc
         except requests.ConnectionError as exc:
-            raise VegaException(
-                "Unable to reach the Vega API. Check API Root and network access."
-            ) from exc
+            raise VegaValidationException(MSG_INVALID_API_ROOT) from exc
 
     def _request(self, method: str, path: str, allow_relogin: bool = True, **kwargs):
         server_attempts = 0
@@ -127,11 +197,13 @@ class VegaManager:
                 self._log("warning", "Vega HTTP 429; waiting %s seconds.", wait)
                 continue
             if status >= 500:
+                if path == LOGIN_PATH:
+                    self._raise_http(response, path)
                 server_attempts += 1
                 if server_attempts <= SERVER_ERROR_RETRIES:
                     self._sleeper(SERVER_ERROR_WAIT_SECONDS)
                     continue
-                self._raise_http(status)
+                self._raise_http(response, path)
             if status == 401 and allow_relogin and path != LOGIN_PATH:
                 self._jwt = None
                 self.login()
@@ -141,7 +213,7 @@ class VegaManager:
                 allow_relogin = False
                 continue
             if not (200 <= status < 300):
-                self._raise_http(status)
+                self._raise_http(response, path)
             self.rate_limiter.on_success()
             return response
 
@@ -159,19 +231,23 @@ class VegaManager:
             "POST",
             LOGIN_PATH,
             allow_relogin=False,
+            headers={
+                "Content-Type": "application/json",
+                "X-Vega-Key-Id": self.access_key_id,
+            },
             json={"access_key": self.access_key},
         )
         try:
             payload = response.json()
         except Exception as exc:
-            raise VegaException("Vega login returned a non-JSON body.") from exc
+            raise VegaValidationException(MSG_INVALID_API_ROOT) from exc
         token = (
             payload.get("session_jwt")
             or payload.get("sessionJwt")
             or payload.get("token")
         )
         if not token:
-            raise VegaUnauthorizedException(MSG_UNAUTHORIZED)
+            raise VegaUnauthorizedException(MSG_INVALID_ACCESS_KEY)
         self._jwt = str(token)
         return self._jwt
 
@@ -188,12 +264,19 @@ class VegaManager:
             raise VegaException("Vega GraphQL returned a non-JSON body.") from exc
         if payload.get("errors"):
             message = payload["errors"][0].get("message") if payload["errors"] else ""
-            raise VegaException(message or "Vega GraphQL returned errors.")
+            classified = classify_credential_error(message)
+            if classified:
+                raise VegaUnauthorizedException(classified)
+            raise VegaException("Vega request failed. Please try again.")
         return payload.get("data") or {}
 
     def test_connection(self) -> bool:
-        """Reach Vega with login_machine only. Test does not run GraphQL."""
+        """Validate API Root, Access Key, and Access Key ID before ingest."""
         self.login()
+        try:
+            self.get_alerts({"limit": 1, "offset": 0}, max_records=1)
+        except VegaBadRequestException as exc:
+            raise VegaUnauthorizedException(MSG_INVALID_ACCESS_KEY_ID) from exc
         return True
 
     def _paged(
@@ -221,9 +304,17 @@ class VegaManager:
             envelope = data.get(envelope_key) or {}
             error = envelope.get("error") or envelope.get("errors") or {}
             if isinstance(error, dict) and (error.get("code") or error.get("message")):
-                raise VegaException(error.get("message") or "Vega query failed.")
+                message = error.get("message") or "Vega query failed."
+                classified = classify_credential_error(message)
+                if classified:
+                    raise VegaUnauthorizedException(classified)
+                raise VegaException(message)
             if isinstance(error, list) and error:
-                raise VegaException(error[0].get("message") or "Vega query failed.")
+                message = error[0].get("message") if isinstance(error[0], dict) else str(error[0])
+                classified = classify_credential_error(message)
+                if classified:
+                    raise VegaUnauthorizedException(classified)
+                raise VegaException(message or "Vega query failed.")
             records = envelope.get(records_key) or []
             if not records:
                 break
@@ -248,50 +339,141 @@ class VegaManager:
             GET_INCIDENTS_QUERY, "getIncidents", "incidents", variables, max_records
         )
 
-    def get_alert_events(self, alert_id: str, limit: int = 200, offset: int = 0) -> dict:
+    def get_alert_events(
+        self, alert_id: str, limit: int = ALERT_EVENTS_PAGE_SIZE, offset: int = 0
+    ) -> dict:
         data = self.graphql(
             GET_ALERT_EVENTS_QUERY,
             {"alertId": alert_id, "limit": limit, "offset": offset},
         )
-        return data.get("getAlertsEvents") or {}
+        envelope = data.get("getAlertsEvents") or {}
+        if not isinstance(envelope, dict):
+            return {}
+        envelope = dict(envelope)
+        envelope["results"] = parse_alert_events_results(envelope.get("results"))
+        return envelope
 
-    def get_all_alert_events(
-        self, alert_id: str, page_size: int = ALERT_EVENTS_PAGE_SIZE
+    def _collect_paged(
+        self,
+        fetch_page,
+        records_key: str,
+        page_size: int,
+        max_records: int,
+        label: str,
     ) -> list:
         collected: list = []
         offset = 0
-        while True:
-            envelope = self.get_alert_events(alert_id, limit=page_size, offset=offset)
+        total: Optional[int] = None
+        while len(collected) < max_records:
+            request_size = min(max(int(page_size or 1), 1), max_records - len(collected))
+            try:
+                envelope = fetch_page(request_size, offset)
+            except Exception:
+                if collected:
+                    break
+                raise
+            if not isinstance(envelope, dict):
+                envelope = {}
             error = envelope.get("error") or {}
             if isinstance(error, dict) and (error.get("code") or error.get("message")):
-                raise VegaException(error.get("message") or "getAlertsEvents failed.")
-            results = envelope.get("results") or []
-            if isinstance(results, dict):
-                results = [results]
-            if not isinstance(results, list) or not results:
+                if collected:
+                    self._log(
+                        "warning",
+                        "Stopped paging Vega %s after %s row(s): %s",
+                        label,
+                        len(collected),
+                        error.get("message") or error.get("code"),
+                    )
+                    break
+                raise VegaException(
+                    error.get("message") or f"{label} fetch failed."
+                )
+            records = envelope.get(records_key) or []
+            if isinstance(records, dict):
+                records = [records]
+            if not isinstance(records, list) or not records:
                 break
-            collected.extend(results)
-            offset += len(results)
-            total = envelope.get("total")
-            if total is not None and offset >= int(total):
+            collected.extend(records)
+            offset += len(records)
+            page_total = envelope.get("total")
+            if page_total is not None:
+                try:
+                    parsed_total = int(page_total)
+                    if parsed_total > 0:
+                        total = parsed_total
+                except (TypeError, ValueError):
+                    pass
+            if total is not None and offset >= total:
                 break
-            if len(results) < page_size:
-                break
-        return collected
+        return collected[:max_records]
+
+    def get_all_alert_events(
+        self,
+        alert_id: str,
+        page_size: int = ALERT_EVENTS_PAGE_SIZE,
+    ) -> list:
+        return self._collect_paged(
+            lambda limit, offset: self.get_alert_events(alert_id, limit, offset),
+            "results",
+            page_size,
+            ALERT_EVENTS_MAX_FETCH,
+            f"alert events for {alert_id}",
+        )
 
     def get_incident_timeline(
-        self, incident_id: str, limit: int = 100, offset: int = 0
+        self,
+        incident_id: str,
+        limit: int = TIMELINE_PAGE_SIZE,
+        offset: int = 0,
     ) -> dict:
         data = self.graphql(
             GET_INCIDENT_TIMELINE_QUERY,
             {"incidentId": incident_id, "limit": limit, "offset": offset},
         )
-        return data.get("getIncidentTimeline") or {}
+        envelope = data.get("getIncidentTimeline") or {}
+        if not isinstance(envelope, dict):
+            return {}
+        envelope = dict(envelope)
+        events = envelope.get("events") or []
+        if isinstance(events, dict):
+            events = [events]
+        if not isinstance(events, list):
+            events = []
+        envelope["events"] = [item for item in events if isinstance(item, dict)]
+        return envelope
+
+    def get_all_incident_timeline(
+        self,
+        incident_id: str,
+        page_size: int = TIMELINE_PAGE_SIZE,
+    ) -> list:
+        return self._collect_paged(
+            lambda limit, offset: self.get_incident_timeline(
+                incident_id, limit, offset
+            ),
+            "events",
+            page_size,
+            TIMELINE_MAX_FETCH,
+            f"incident timeline for {incident_id}",
+        )
 
     def get_incident(self, incident_id: str) -> dict:
+        lookup = str(incident_id).strip()
         records = self.get_incidents(
             {
-                "incidentIds": [incident_id],
+                "incidentIds": [lookup],
+                "from": None,
+                "to": None,
+                "updatedFrom": None,
+                "updatedTo": None,
+            },
+            max_records=1,
+        )
+        if records:
+            return records[0]
+        records = self.get_incidents(
+            {
+                "vegaIncidentIds": [lookup],
                 "from": None,
                 "to": None,
                 "updatedFrom": None,

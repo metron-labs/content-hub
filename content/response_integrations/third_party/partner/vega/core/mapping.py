@@ -34,13 +34,29 @@ def record_id(record: dict, entity_type: str) -> str:
     return str(record.get("id") or record.get("vegaAlertId") or "").strip()
 
 
+def record_display_id(record: dict, entity_type: str) -> str:
+    """Human-facing Vega ID used in the SOAR case title."""
+    if entity_type == ENTITY_TYPE_INCIDENT:
+        return str(
+            record.get("vegaUniqueIncidentId")
+            or record.get("id")
+            or record.get("incidentId")
+            or ""
+        ).strip()
+    return str(record.get("vegaAlertId") or record.get("id") or "").strip()
+
+
 def record_name(record: dict) -> str:
     return str(record.get("name") or record.get("incidentName") or "Vega record").strip()
 
 
 def case_display_name(record: dict, entity_type: str) -> str:
-    """SOAR case/alert title: Vega Alert - <name> or Vega Incident - <name>."""
-    return f"Vega {entity_type} - {record_name(record)}"
+    """SOAR case title: Vega Alert - <vegaAlertId> - <name>."""
+    display_id = record_display_id(record, entity_type)
+    name = record_name(record)
+    if display_id:
+        return f"Vega {entity_type} - {display_id} - {name}"
+    return f"Vega {entity_type} - {name}"
 
 
 def record_severity(record: dict) -> str:
@@ -132,8 +148,13 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
         "created_at": str(record.get("createdAt") or ""),
         "updated_at": record_timestamp(record),
         "vega_entity_type": entity_type,
+        "vega_alert_id": str(record.get("vegaAlertId") or ""),
+        "vega_unique_incident_id": str(record.get("vegaUniqueIncidentId") or ""),
         "vega_comments": _safe_json(record.get("comments") or []),
         "vega_recommended_actions": _safe_json(record.get("recommendedActions") or []),
+        "vega_investigation_plan": _safe_json(record.get("investigationPlan") or []),
+        "vega_labels": _safe_json(record.get("labels") or []),
+        "vega_skills": _safe_json(record.get("skills") or []),
         "vega_timeline": _safe_json(record.get("timeline") or []),
         "vega_alert_events": _safe_json(record.get("alert_events") or []),
         "vega_observables": _safe_json(record.get("observables") or []),
@@ -145,6 +166,39 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
     return event
 
 
+def _try_parse_json(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "{[":
+        return value
+    try:
+        return json.loads(text)
+    except Exception:
+        return value
+
+
+def normalize_alert_event(vega_event: Any) -> dict:
+    """Parse getAlertsEvents rows, including JSON `fields` / `fields._raw` payloads."""
+    payload = dict(vega_event) if isinstance(vega_event, dict) else {"value": vega_event}
+    fields = _try_parse_json(payload.get("fields"))
+    if not isinstance(fields, dict):
+        return payload
+    merged = dict(payload)
+    raw = _try_parse_json(fields.get("_raw"))
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if key not in merged or merged[key] in (None, ""):
+                merged[key] = value
+    for key, value in fields.items():
+        if key == "_raw":
+            continue
+        if key not in merged or merged[key] in (None, ""):
+            merged[key] = value
+    merged["fields"] = fields
+    return merged
+
+
 def build_vega_alert_event_dict(
     parent: dict,
     vega_event: Any,
@@ -154,12 +208,13 @@ def build_vega_alert_event_dict(
 ) -> dict:
     """Map one Vega getAlertsEvents result onto a SOAR event for a Vega Alert case."""
     identifier = record_id(parent, ENTITY_TYPE_ALERT)
-    payload = vega_event if isinstance(vega_event, dict) else {"value": vega_event}
+    payload = normalize_alert_event(vega_event)
     name = str(
         payload.get("name")
         or payload.get("summary")
         or payload.get("message")
         or payload.get("eventName")
+        or payload.get("event_name")
         or f"Vega Alert Event {index + 1}"
     ).strip()
     event = {
@@ -178,6 +233,10 @@ def build_vega_alert_event_dict(
         "vega_entity_type": ENTITY_TYPE_ALERT,
         "details": _safe_json(payload),
     }
+    for key, value in payload.items():
+        if key in event or value in (None, ""):
+            continue
+        event[str(key)] = value if not isinstance(value, (dict, list)) else _safe_json(value)
     event.update(_flatten_entities(payload))
     return event
 

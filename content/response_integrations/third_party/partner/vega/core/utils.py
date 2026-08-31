@@ -18,13 +18,24 @@ from .constants import (
     LOOKBACK_MIN,
     MSG_BAD_REQUEST,
     MSG_FORBIDDEN,
+    MSG_INVALID_ACCESS_KEY,
+    MSG_INVALID_ACCESS_KEY_ID,
     MSG_NOT_FOUND,
     MSG_RATE_LIMIT,
     MSG_SERVER_ERROR,
     MSG_TIMEOUT,
     MSG_UNAUTHORIZED,
     MSG_UNREACHABLE,
-    OUTGOING_FIELD_OPTIONS,
+    PARAM_ALERT_SEVERITIES,
+    PARAM_ALERT_STATUSES,
+    PARAM_ALERT_VERDICTS,
+    PARAM_BACKFILL,
+    PARAM_ENTITIES,
+    PARAM_HAS_RELATED,
+    PARAM_INCIDENT_SEVERITIES,
+    PARAM_INCIDENT_STATUSES,
+    PARAM_INCIDENT_VERDICTS,
+    PARAM_LOOKBACK,
     RELATED_OPTIONS,
     SEVERITY_OPTIONS,
     VERDICT_OPTIONS,
@@ -111,10 +122,10 @@ def normalize_api_root(value: Any) -> str:
     text = str(value or "").strip().rstrip("/")
     if not text:
         raise VegaValidationException(
-            "API Root is required. Enter the Vega HTTPS base URL."
+            "API Root is required. Enter the Vega HTTPS base URL, for example https://api.vega.io."
         )
     parsed = urlparse(text)
-    if parsed.scheme != "https" or not parsed.netloc:
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
         raise VegaValidationException(
             "API Root must be an HTTPS URL, for example https://api.vega.io."
         )
@@ -124,7 +135,7 @@ def normalize_api_root(value: Any) -> str:
 def require_secret(value: Any, name: str) -> str:
     text = str(value or "").strip()
     if not text:
-        raise VegaValidationException(f"{name} is required.")
+        raise VegaValidationException(f"{name} is required. Enter a valid {name}.")
     return text
 
 
@@ -134,24 +145,25 @@ def parse_int_in_range(
     minimum: int,
     maximum: int,
     default: Optional[int] = None,
-    clamp_default: Optional[int] = None,
 ) -> int:
-    """Parse an integer. Out-of-range uses clamp_default when set."""
-    if value is None or str(value).strip() == "":
+    """Parse a required integer in [minimum, maximum]. Invalid values raise."""
+    text = "" if value is None else str(value).strip()
+    if text == "":
         if default is not None:
             return default
-        raise VegaValidationException(f"{name} is required.")
-    try:
-        number = int(str(value).strip())
-    except (TypeError, ValueError) as exc:
-        if clamp_default is not None:
-            return clamp_default
-        raise VegaValidationException(f"{name} must be an integer.") from exc
-    if number < minimum or number > maximum:
-        if clamp_default is not None:
-            return clamp_default
         raise VegaValidationException(
-            f"{name} must be between {minimum} and {maximum}."
+            f"{name} is required. Enter an integer from {minimum} to {maximum}."
+        )
+    if not re.fullmatch(r"-?\d+", text):
+        raise VegaValidationException(
+            f'"{text}" is not a valid value for {name}. '
+            f"Enter an integer from {minimum} to {maximum}."
+        )
+    number = int(text)
+    if number < minimum or number > maximum:
+        raise VegaValidationException(
+            f'"{text}" is not a valid value for {name}. '
+            f"Use a number from {minimum} to {maximum}."
         )
     return number
 
@@ -159,20 +171,18 @@ def parse_int_in_range(
 def parse_lookback_minutes(value: Any) -> int:
     return parse_int_in_range(
         value,
-        "Fetch Lookback (Minutes)",
+        PARAM_LOOKBACK,
         LOOKBACK_MIN,
         LOOKBACK_MAX,
-        default=5,
     )
 
 
 def parse_backfill_days(value: Any) -> int:
     return parse_int_in_range(
         value,
-        "Max Days Backwards",
+        PARAM_BACKFILL,
         BACKFILL_MIN,
         BACKFILL_MAX,
-        default=30,
     )
 
 
@@ -181,35 +191,56 @@ def to_graphql_enum(value: str) -> str:
     return " ".join(str(value).split()).replace(" ", "_")
 
 
-def _filter_known(selected: list[str], allowed: Iterable[str]) -> list[str]:
+def _raise_unsupported(param_name: str, unknown: list[str], allowed: Iterable[str]) -> None:
+    quoted = ", ".join(f'"{item}"' for item in unknown)
+    possible = ", ".join(allowed)
+    if len(unknown) == 1:
+        raise VegaValidationException(
+            f"{quoted} is not a valid value for {param_name}. Use one of: {possible}."
+        )
+    raise VegaValidationException(
+        f"{quoted} are not valid values for {param_name}. Use only: {possible}."
+    )
+
+
+def _filter_known(selected: list[str], allowed: Iterable[str]) -> tuple[list[str], list[str]]:
     allowed_map = {item.upper(): to_graphql_enum(item) for item in allowed}
     allowed_tokens = {to_graphql_enum(item).upper(): to_graphql_enum(item) for item in allowed}
     result: list[str] = []
+    unknown: list[str] = []
     seen: set[str] = set()
+    seen_unknown: set[str] = set()
     for raw in selected:
         token = to_graphql_enum(raw)
         key = token.upper()
         mapped = allowed_map.get(raw.strip().upper()) or allowed_tokens.get(key)
         if not mapped:
+            label = " ".join(str(raw).split())
+            if label and label not in seen_unknown:
+                seen_unknown.add(label)
+                unknown.append(label)
             continue
         if mapped in seen:
             continue
         seen.add(mapped)
         result.append(mapped)
-    return result
+    return result, unknown
 
 
 def resolve_multi_filter(
     raw: Any,
     allowed: Iterable[str],
     *,
+    param_name: str,
     empty_means_all: bool = True,
 ) -> Optional[list[str]]:
-    """Return GraphQL enum values. Unknown values are ignored. Empty = all/omit."""
+    """Return GraphQL enum values. Empty = all/omit. Unsupported values raise."""
     selected = parse_csv_list(raw)
     if not selected:
         return None if empty_means_all else []
-    resolved = _filter_known(selected, allowed)
+    resolved, unknown = _filter_known(selected, allowed)
+    if unknown:
+        _raise_unsupported(param_name, unknown, allowed)
     if not resolved:
         return None if empty_means_all else []
     allowed_list = [to_graphql_enum(item) for item in allowed]
@@ -219,60 +250,75 @@ def resolve_multi_filter(
 
 
 def resolve_entities(raw: Any) -> list[str]:
-    selected = parse_csv_list(raw) or list(ENTITY_OPTIONS)
+    selected = parse_csv_list(raw)
+    if not selected:
+        raise VegaValidationException(
+            f"{PARAM_ENTITIES} is required. Use one or both of: {', '.join(ENTITY_OPTIONS)}."
+        )
     known = {item.lower(): item for item in ENTITY_OPTIONS}
     resolved = []
+    unknown = []
     for item in selected:
         match = known.get(item.lower())
-        if match and match not in resolved:
-            resolved.append(match)
+        if match:
+            if match not in resolved:
+                resolved.append(match)
+            continue
+        if item not in unknown:
+            unknown.append(item)
+    if unknown:
+        _raise_unsupported(PARAM_ENTITIES, unknown, ENTITY_OPTIONS)
     if not resolved:
         raise VegaValidationException(
-            "Vega Entities to Fetch must include Alerts and/or Incidents."
+            f"{PARAM_ENTITIES} is required. Use one or both of: {', '.join(ENTITY_OPTIONS)}."
         )
     return resolved
 
 
 def resolve_has_related(raw: Any) -> Optional[bool]:
-    selected = parse_csv_list(raw) or list(RELATED_OPTIONS)
+    selected = parse_csv_list(raw)
+    if not selected:
+        raise VegaValidationException(
+            f"{PARAM_HAS_RELATED} is required. Use one or both of: {', '.join(RELATED_OPTIONS)}."
+        )
     known = {item.lower(): item for item in RELATED_OPTIONS}
     resolved = []
+    unknown = []
     for item in selected:
         match = known.get(item.lower())
-        if match and match not in resolved:
-            resolved.append(match)
+        if match:
+            if match not in resolved:
+                resolved.append(match)
+            continue
+        if item not in unknown:
+            unknown.append(item)
+    if unknown:
+        _raise_unsupported(PARAM_HAS_RELATED, unknown, RELATED_OPTIONS)
     if not resolved:
         raise VegaValidationException(
-            "Has Related Incidents must include Yes and/or No."
+            f"{PARAM_HAS_RELATED} is required. Use one or both of: {', '.join(RELATED_OPTIONS)}."
         )
     if set(resolved) == set(RELATED_OPTIONS):
         return None
     return resolved[0] == "Yes"
 
 
-def resolve_outgoing_fields(raw: Any) -> list[str]:
-    selected = parse_csv_list(raw)
-    if not selected:
-        return list(OUTGOING_FIELD_OPTIONS)
-    known = {item.lower(): item for item in OUTGOING_FIELD_OPTIONS}
-    resolved = []
-    for item in selected:
-        match = known.get(item.lower())
-        if match and match not in resolved:
-            resolved.append(match)
-    return resolved or list(OUTGOING_FIELD_OPTIONS)
-
-
 def resolve_alert_filters(config: dict) -> dict:
     return {
         "severities": resolve_multi_filter(
-            config.get("alert_severities"), SEVERITY_OPTIONS
+            config.get("alert_severities"),
+            SEVERITY_OPTIONS,
+            param_name=PARAM_ALERT_SEVERITIES,
         ),
         "statuses": resolve_multi_filter(
-            config.get("alert_statuses"), ALERT_STATUS_OPTIONS
+            config.get("alert_statuses"),
+            ALERT_STATUS_OPTIONS,
+            param_name=PARAM_ALERT_STATUSES,
         ),
         "verdicts": resolve_multi_filter(
-            config.get("alert_verdicts"), VERDICT_OPTIONS
+            config.get("alert_verdicts"),
+            VERDICT_OPTIONS,
+            param_name=PARAM_ALERT_VERDICTS,
         ),
         "has_related": resolve_has_related(config.get("has_related")),
     }
@@ -281,13 +327,19 @@ def resolve_alert_filters(config: dict) -> dict:
 def resolve_incident_filters(config: dict) -> dict:
     return {
         "severities": resolve_multi_filter(
-            config.get("incident_severities"), SEVERITY_OPTIONS
+            config.get("incident_severities"),
+            SEVERITY_OPTIONS,
+            param_name=PARAM_INCIDENT_SEVERITIES,
         ),
         "statuses": resolve_multi_filter(
-            config.get("incident_statuses"), INCIDENT_STATUS_OPTIONS
+            config.get("incident_statuses"),
+            INCIDENT_STATUS_OPTIONS,
+            param_name=PARAM_INCIDENT_STATUSES,
         ),
         "verdicts": resolve_multi_filter(
-            config.get("incident_verdicts"), VERDICT_OPTIONS
+            config.get("incident_verdicts"),
+            VERDICT_OPTIONS,
+            param_name=PARAM_INCIDENT_VERDICTS,
         ),
     }
 
@@ -310,22 +362,48 @@ def redact(value: Any) -> Any:
     return value
 
 
+_KEY_ID_HINTS = (
+    "key-id",
+    "key_id",
+    "keyid",
+    "x-vega-key-id",
+    "access key id",
+    "access_key_id",
+)
+_ACCESS_KEY_ONLY_RE = re.compile(r"access[_\s]?key(?![_\s]?id)")
+
+
+def classify_credential_error(text: str) -> Optional[str]:
+    """Return a specific credential message when the API text names the field."""
+    raw = (text or "").lower()
+    mentions_key_id = any(hint in raw for hint in _KEY_ID_HINTS)
+    mentions_key = bool(_ACCESS_KEY_ONLY_RE.search(raw))
+    if mentions_key_id and not mentions_key:
+        return MSG_INVALID_ACCESS_KEY_ID
+    if mentions_key and not mentions_key_id:
+        return MSG_INVALID_ACCESS_KEY
+    return None
+
+
 def format_user_facing_error(exc: BaseException) -> str:
     if isinstance(exc, VegaValidationException):
         return str(exc)
     if isinstance(exc, VegaUnauthorizedException):
-        return MSG_UNAUTHORIZED
+        return str(exc).strip() or MSG_UNAUTHORIZED
     if isinstance(exc, VegaForbiddenException):
         return MSG_FORBIDDEN
     if isinstance(exc, VegaBadRequestException):
-        return MSG_BAD_REQUEST
+        return str(exc).strip() or MSG_BAD_REQUEST
     if isinstance(exc, VegaNotFoundException):
         return MSG_NOT_FOUND
     if isinstance(exc, VegaRateLimitException):
         return MSG_RATE_LIMIT
     if isinstance(exc, VegaTimeoutException):
-        return MSG_TIMEOUT
+        return str(exc).strip() or MSG_TIMEOUT
     if isinstance(exc, VegaException):
+        classified = classify_credential_error(str(exc))
+        if classified:
+            return classified
         return str(exc)[:300] or "Vega request failed. Please try again."
     raw = str(exc or "").strip().lower()
     if "timeout" in raw or "timed out" in raw:
@@ -335,7 +413,7 @@ def format_user_facing_error(exc: BaseException) -> str:
     if "429" in raw:
         return MSG_RATE_LIMIT
     if "401" in raw:
-        return MSG_UNAUTHORIZED
+        return classify_credential_error(raw) or MSG_UNAUTHORIZED
     cleaned = _JSONISH_RE.sub("", str(exc or ""))
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" :-")[:300]
     return cleaned or "Unexpected error while talking to Vega. Check configuration."

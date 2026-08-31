@@ -1,5 +1,6 @@
 name: Get Alert Events
-description: Fetch aggregated alert events for a Vega alert. When Alert ID is omitted,
+description: Fetch aggregated alert events for a Vega alert, paging until all
+    events are returned when Vega reports additional rows. When Alert ID is omitted,
     uses vega_id from the current alert.
 integration_identifier: Vega
 parameters:
@@ -9,14 +10,14 @@ parameters:
     description: Vega alert UUID. Optional when running on a Vega alert.
     is_mandatory: false
 -   name: Limit
-    default_value: '200'
+    default_value: '100'
     type: playbook_name
-    description: Page size.
+    description: API page size used while fetching every alert event.
     is_mandatory: false
 -   name: Offset
     default_value: '0'
     type: playbook_name
-    description: Pagination offset.
+    description: Unused for fetch; all pages are returned in JsonResult.
     is_mandatory: false
 dynamic_results_metadata:
 -   result_example_path: resources/get_alert_events_JsonResult_example.json

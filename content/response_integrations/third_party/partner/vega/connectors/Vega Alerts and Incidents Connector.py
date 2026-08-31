@@ -2,7 +2,7 @@
 Vega Alerts and Incidents Connector.
 
 Polls Vega alerts/incidents into SOAR AlertInfo packages. Optional outbound
-sync writes closed Vega-sourced cases back to Vega.
+sync closes matching Vega alerts or incidents when the SOAR case is closed.
 """
 from __future__ import annotations
 
@@ -53,7 +53,6 @@ def main(is_test_run: bool):
         PARAM_INCIDENT_STATUSES,
         PARAM_INCIDENT_VERDICTS,
         PARAM_LOOKBACK,
-        PARAM_OUTGOING_FIELDS,
         PARAM_SYNC,
         REMEDIATION_PROPERTY_KEY,
         TEST_RUN_MAX_FETCH,
@@ -72,8 +71,6 @@ def main(is_test_run: bool):
             access_key=siemplify.extract_connector_param(param_name=PARAM_ACCESS_KEY),
             logger_instance=siemplify.LOGGER,
         )
-        if is_test_run:
-            manager.test_connection()
         pipeline = IngestionPipeline(
             manager=manager,
             entities_raw=siemplify.extract_connector_param(
@@ -109,6 +106,8 @@ def main(is_test_run: bool):
             max_fetch=TEST_RUN_MAX_FETCH if is_test_run else None,
             logger_instance=siemplify.LOGGER,
         )
+        if is_test_run:
+            manager.test_connection()
         checkpoint = {} if is_test_run else _read_json(
             siemplify, _connector_id(siemplify), CHECKPOINT_PROPERTY_KEY
         )
@@ -136,9 +135,6 @@ def main(is_test_run: bool):
                 remediator = SoarRemediator(
                     manager=manager,
                     siemplify=siemplify,
-                    fields_raw=siemplify.extract_connector_param(
-                        param_name=PARAM_OUTGOING_FIELDS, default_value=""
-                    ),
                     logger_instance=siemplify.LOGGER,
                 )
                 rem_result = remediator.run_once(rem_state)

@@ -32,10 +32,7 @@ def main():
     except Exception as error:
         result_value = False
         status = EXECUTION_STATE_FAILED
-        output_message = (
-            f"Failed to connect to the {INTEGRATION_NAME} server! "
-            f"Error: {format_user_facing_error(error)}"
-        )
+        output_message = format_user_facing_error(error)
         siemplify.LOGGER.error(output_message)
 
     siemplify.LOGGER.info(f"Status: {status}")

@@ -1,6 +1,7 @@
 name: Get Incident Timeline
-description: Fetch the Vega incident timeline for an incident ID. When Incident ID
-    is omitted, uses vega_id from the current alert.
+description: Fetch the Vega incident timeline for an incident ID, paging until all
+    events are returned. When Incident ID is omitted, uses vega_id from the current
+    alert.
 integration_identifier: Vega
 parameters:
 -   name: Incident ID

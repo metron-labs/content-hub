@@ -44,11 +44,16 @@ def main():
             access_key=siemplify.extract_configuration_param(INTEGRATION_NAME, PARAM_ACCESS_KEY),
             logger_instance=siemplify.LOGGER,
         )
-        result = manager.get_incident_timeline(str(incident_id).strip())
+        events = manager.get_all_incident_timeline(str(incident_id).strip())
+        result = {
+            "events": events,
+            "total": len(events),
+            "limit": len(events),
+            "offset": 0,
+        }
         siemplify.result.add_result_json(result)
-        count = len(result.get("events") or [])
         siemplify.end(
-            f"Fetched {count} timeline event(s) for Vega incident {incident_id}.",
+            f"Fetched {len(events)} timeline event(s) for Vega incident {incident_id}.",
             True,
             EXECUTION_STATE_COMPLETED,
         )

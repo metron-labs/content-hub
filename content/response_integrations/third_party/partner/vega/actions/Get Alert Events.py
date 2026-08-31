@@ -34,7 +34,7 @@ def main():
 
     siemplify.script_name = GET_ALERT_EVENTS_SCRIPT_NAME
     alert_id = siemplify.extract_action_param("Alert ID", default_value="", print_value=True)
-    limit = siemplify.extract_action_param("Limit", default_value="200")
+    limit = siemplify.extract_action_param("Limit", default_value="100")
     offset = siemplify.extract_action_param("Offset", default_value="0")
     if not str(alert_id).strip():
         alert_id = _current_vega_id(siemplify)
@@ -45,11 +45,20 @@ def main():
             access_key=siemplify.extract_configuration_param(INTEGRATION_NAME, PARAM_ACCESS_KEY),
             logger_instance=siemplify.LOGGER,
         )
-        result = manager.get_alert_events(str(alert_id).strip(), int(limit or 200), int(offset or 0))
+        page_size = int(limit or 100)
+        all_events = manager.get_all_alert_events(
+            str(alert_id).strip(),
+            page_size=page_size,
+        )
+        result = {
+            "total": len(all_events),
+            "limit": page_size,
+            "offset": int(offset or 0),
+            "results": all_events,
+        }
         siemplify.result.add_result_json(result)
-        count = len(result.get("results") or [])
         siemplify.end(
-            f"Fetched {count} Vega alert event(s) for {alert_id}.",
+            f"Fetched {len(all_events)} Vega alert event(s) for {alert_id}.",
             True,
             EXECUTION_STATE_COMPLETED,
         )

@@ -31,7 +31,10 @@ LOOKBACK_MAX = 60
 BACKFILL_MIN = 0
 BACKFILL_MAX = 365
 GRAPHQL_PAGE_SIZE = 50
-ALERT_EVENTS_PAGE_SIZE = 200
+ALERT_EVENTS_PAGE_SIZE = 100
+ALERT_EVENTS_MAX_FETCH = 2500
+TIMELINE_PAGE_SIZE = 100
+TIMELINE_MAX_FETCH = 2500
 TEST_RUN_MAX_FETCH = 5
 MAX_CONSECUTIVE_429 = 6
 RATE_LIMIT_INITIAL_WAIT_SECONDS = 2
@@ -57,8 +60,7 @@ PARAM_HAS_RELATED = "Has Related Incidents"
 PARAM_INCIDENT_SEVERITIES = "Incident Severities to Fetch"
 PARAM_INCIDENT_STATUSES = "Incident Statuses to Fetch"
 PARAM_INCIDENT_VERDICTS = "Incident Verdicts to Fetch"
-PARAM_SYNC = "Sync Case Updates to Vega"
-PARAM_OUTGOING_FIELDS = "Outgoing Fields to Sync"
+PARAM_SYNC = "Sync Case Close to Vega"
 
 SEVERITY_OPTIONS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 ALERT_STATUS_OPTIONS = ("OPEN", "IN PROGRESS", "PEER REVIEW", "RESOLVED")
@@ -76,13 +78,6 @@ INCIDENT_STATUS_OPTIONS = (
 VERDICT_OPTIONS = ("MALICIOUS", "SUSPICIOUS", "BENIGN", "INCONCLUSIVE", "NA")
 ENTITY_OPTIONS = ("Alerts", "Incidents")
 RELATED_OPTIONS = ("Yes", "No")
-OUTGOING_FIELD_OPTIONS = (
-    "Status",
-    "Severity",
-    "Verdict",
-    "Verdict Reasoning",
-    "Comments",
-)
 DETECTION_STATES = ("ENABLED", "DISABLED", "TEST_MODE")
 
 SEVERITY_TO_ALERT_PRIORITY = {
@@ -93,15 +88,28 @@ SEVERITY_TO_ALERT_PRIORITY = {
 }
 
 MSG_UNAUTHORIZED = (
-    "Invalid Access Key or Access Key ID. Check your credentials and try again."
+    "The Access Key or Access Key ID is incorrect. Check both values and try again."
+)
+MSG_INVALID_ACCESS_KEY = (
+    "The Access Key is incorrect. Enter a valid Access Key and try again."
+)
+MSG_INVALID_ACCESS_KEY_ID = (
+    "The Access Key ID is incorrect. Enter a valid Access Key ID and try again."
+)
+MSG_INVALID_API_ROOT = (
+    "The API Root is incorrect or unreachable. Enter a valid Vega HTTPS URL, "
+    "for example https://api.vega.io."
 )
 MSG_FORBIDDEN = "Access denied by Vega. Verify the Access Key permissions."
 MSG_BAD_REQUEST = "Invalid request to Vega. Check filters and identifiers."
 MSG_NOT_FOUND = "Requested Vega resource was not found."
 MSG_RATE_LIMIT = "Vega rate limit reached. Wait and try again."
 MSG_SERVER_ERROR = "Vega is temporarily unavailable. Try again later."
-MSG_TIMEOUT = "Connection to Vega timed out. Check network access and try again."
-MSG_UNREACHABLE = "Unable to reach the Vega API. Check API Root and network access."
+MSG_TIMEOUT = (
+    "Connection to Vega timed out. Check the API Root and network access, "
+    "then try again."
+)
+MSG_UNREACHABLE = MSG_INVALID_API_ROOT
 
 GET_ALERTS_QUERY = """
 query GetAlerts(
@@ -164,31 +172,44 @@ query GetAlerts(
 
 GET_INCIDENTS_QUERY = """
 query GetIncidents(
+  $incidentNames: [String!],
+  $nameContains: String,
   $incidentIds: [ID!],
+  $vegaIncidentIds: [String!],
   $severities: [IncidentSeverity!],
   $statuses: [IncidentStatusPublic!],
   $verdicts: [IncidentVerdictPublic!],
+  $assets: [String!],
   $from: Time,
   $to: Time,
   $updatedFrom: Time,
   $updatedTo: Time,
+  $sortBy: IncidentSortFieldPublic,
+  $sortOrder: SortOrderPublic,
   $limit: Int,
   $offset: Int
 ) {
   getIncidents(
+    incidentNames: $incidentNames,
+    nameContains: $nameContains,
     incidentIds: $incidentIds,
+    vegaIncidentIds: $vegaIncidentIds,
     severities: $severities,
     statuses: $statuses,
     verdicts: $verdicts,
+    assets: $assets,
     from: $from,
     to: $to,
     updatedFrom: $updatedFrom,
     updatedTo: $updatedTo,
+    sortBy: $sortBy,
+    sortOrder: $sortOrder,
     limit: $limit,
     offset: $offset
   ) {
     incidents {
       id
+      vegaUniqueIncidentId
       name
       createdBy
       createdAt
@@ -207,8 +228,16 @@ query GetIncidents(
       observables
       alertsCount
       alerts { alertId name createdAt }
-      recommendedActions { name description }
+      recommendedActions { name description actionKey targetParams }
+      investigationPlan {
+        stepName
+        stepConclusion
+        cells { cellName query queryId }
+      }
+      labels { id categoryId name color usageCount }
+      skills { id name version }
       link
+      href
     }
     total
     limit

@@ -4,7 +4,7 @@ parameters:
 -   name: API Root
     default_value: https://api.vega.io
     type: string
-    description: The Base URL of the Vega API.
+    description: The Base URL of the Vega API, for example https://api.vega.io.
     is_mandatory: true
     integration_identifier: Vega
 -   name: Access Key ID
