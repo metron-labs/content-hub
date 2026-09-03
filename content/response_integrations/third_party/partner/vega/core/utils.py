@@ -433,6 +433,48 @@ def safe_log(logger_obj, level: str, msg: str, *args) -> None:
         getattr(logger, level)(text)
 
 
+def iter_current_vega_ids(siemplify) -> list[str]:
+    """Collect Vega IDs from the current SOAR alert's events."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: Any) -> None:
+        text = str(value or "").strip()
+        if not text or ":event:" in text:
+            return
+        if text not in seen:
+            seen.add(text)
+            found.append(text)
+
+    keys = ("vega_id", "product_log_id", "vega_alert_id", "vegaAlertId")
+    try:
+        alert = siemplify.current_alert
+        events = (
+            getattr(alert, "security_events", None)
+            or getattr(alert, "events", None)
+            or []
+        )
+        for event in events:
+            additional = getattr(event, "additional_properties", None) or {}
+            sources = []
+            if isinstance(additional, dict):
+                sources.append(additional)
+            if isinstance(event, dict):
+                sources.append(event)
+            else:
+                sources.append(getattr(event, "__dict__", {}) or {})
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                for key in keys:
+                    _add(source.get(key))
+            for key in keys:
+                _add(getattr(event, key, None))
+    except Exception:
+        return found
+    return found
+
+
 def compute_time_window(
     checkpoint: dict,
     backfill_days: int,

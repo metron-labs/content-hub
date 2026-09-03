@@ -5,7 +5,7 @@ import logging
 from typing import Optional
 
 from .constants import ENTITY_TYPE_ALERT, ENTITY_TYPE_INCIDENT, INGESTED_ID_CAP
-from .mapping import record_id
+from .mapping import record_alert_ids, record_id
 from .utils import (
     compute_time_window,
     parse_backfill_days,
@@ -120,27 +120,34 @@ class IngestionPipeline:
         return record
 
     def _enrich_alert(self, record: dict) -> dict:
-        identifier = record_id(record, ENTITY_TYPE_ALERT)
-        if not identifier:
+        candidates = record_alert_ids(record)
+        if not candidates:
             return record
-        try:
-            events = self.manager.get_all_alert_events(identifier)
-            record = dict(record)
-            record["alert_events"] = events
-            self._log(
-                "info",
-                "Fetched %s event(s) for Vega alert %s (eventCount=%s).",
-                len(events),
-                identifier,
-                record.get("eventCount"),
-            )
-        except Exception as exc:
-            self._log(
-                "warning",
-                "Unable to fetch events for Vega alert %s: %s",
-                identifier,
-                exc,
-            )
+        events: list = []
+        used_id = candidates[0]
+        for alert_id in candidates:
+            try:
+                events = self.manager.get_all_alert_events(alert_id)
+            except Exception as exc:
+                self._log(
+                    "warning",
+                    "Unable to fetch events for Vega alert %s: %s",
+                    alert_id,
+                    exc,
+                )
+                continue
+            used_id = alert_id
+            if events:
+                break
+        record = dict(record)
+        record["alert_events"] = events
+        self._log(
+            "info",
+            "Fetched %s event(s) for Vega alert %s (eventCount=%s).",
+            len(events),
+            used_id,
+            record.get("eventCount"),
+        )
         return record
 
     def _remaining(self, collected: int) -> Optional[int]:

@@ -53,19 +53,65 @@ from .utils import classify_credential_error, normalize_api_root, require_secret
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_json(value: Any, *, depth: int = 3) -> Any:
+    """Decode JSON strings, including double-encoded payloads."""
+    current = value
+    for _ in range(depth):
+        if not isinstance(current, str):
+            return current
+        text = current.strip()
+        if not text:
+            return current
+        if text[0] not in "{[\"":
+            return current
+        try:
+            current = json.loads(text)
+        except json.JSONDecodeError:
+            return current
+    return current
+
+
+def _rows_to_event_dicts(fields: list, rows: list) -> list[dict]:
+    """Convert Splunk-style `{fields, rows}` tables into event dicts."""
+    colnames: list[str] = []
+    for field in fields:
+        if isinstance(field, dict):
+            colnames.append(str(field.get("name") or field.get("field") or "").strip())
+        else:
+            colnames.append(str(field).strip())
+    if not colnames:
+        return []
+    parsed: list[dict] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        event = {
+            colnames[index]: row[index]
+            for index in range(min(len(colnames), len(row)))
+            if colnames[index]
+        }
+        if event:
+            parsed.append(event)
+    return parsed
+
+
 def parse_alert_events_results(results: Any) -> list[dict]:
     """Normalize getAlertsEvents `results` (list, dict, or JSON string) into event dicts."""
     if results is None or results == "":
         return []
-    if isinstance(results, str):
-        text = results.strip()
-        if not text:
-            return []
-        try:
-            results = json.loads(text)
-        except json.JSONDecodeError:
-            return []
+    results = _unwrap_json(results)
     if isinstance(results, dict):
+        fields = results.get("fields")
+        rows = results.get("rows")
+        if (
+            isinstance(fields, list)
+            and isinstance(rows, list)
+            and rows
+            and not isinstance(rows[0], dict)
+        ):
+            tabular = _rows_to_event_dicts(fields, rows)
+            if tabular:
+                return tabular
         for key in ("results", "events", "items", "data", "rows"):
             nested = results.get(key)
             if isinstance(nested, list):
@@ -77,11 +123,7 @@ def parse_alert_events_results(results: Any) -> list[dict]:
         return []
     parsed: list[dict] = []
     for item in results:
-        if isinstance(item, str):
-            try:
-                item = json.loads(item)
-            except json.JSONDecodeError:
-                continue
+        item = _unwrap_json(item)
         if isinstance(item, dict):
             parsed.append(item)
     return parsed
@@ -350,7 +392,17 @@ class VegaManager:
         if not isinstance(envelope, dict):
             return {}
         envelope = dict(envelope)
-        envelope["results"] = parse_alert_events_results(envelope.get("results"))
+        raw_results = envelope.get("results")
+        parsed = parse_alert_events_results(raw_results)
+        if not parsed and raw_results not in (None, "", [], {}):
+            self._log(
+                "warning",
+                "getAlertsEvents returned results that did not parse to events "
+                "(alertId=%s, type=%s).",
+                alert_id,
+                type(raw_results).__name__,
+            )
+        envelope["results"] = parsed
         return envelope
 
     def _collect_paged(
@@ -412,13 +464,16 @@ class VegaManager:
         alert_id: str,
         page_size: int = ALERT_EVENTS_PAGE_SIZE,
     ) -> list:
-        return self._collect_paged(
+        from .mapping import normalize_alert_event
+
+        collected = self._collect_paged(
             lambda limit, offset: self.get_alert_events(alert_id, limit, offset),
             "results",
             page_size,
             ALERT_EVENTS_MAX_FETCH,
             f"alert events for {alert_id}",
         )
+        return [normalize_alert_event(item) for item in collected]
 
     def get_incident_timeline(
         self,

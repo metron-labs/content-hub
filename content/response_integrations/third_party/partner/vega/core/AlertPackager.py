@@ -1,7 +1,7 @@
 """Build SOAR AlertInfo packages from Vega alerts and incidents."""
 from __future__ import annotations
 
-from .constants import ENTITY_TYPE_ALERT, VENDOR_NAME
+from .constants import ENTITY_TYPE_ALERT, MAX_EVENTS_PER_ALERT, VENDOR_NAME
 from .mapping import (
     alert_priority,
     build_event_dict,
@@ -16,8 +16,22 @@ from .utils import parse_iso_timestamp, safe_log
 def _unix_ms(record: dict, fallback: int) -> int:
     if not isinstance(record, dict):
         return fallback
-    for key in ("updatedAt", "lastUpdated", "createdAt", "timestamp", "eventTime", "time"):
-        parsed = parse_iso_timestamp(str(record.get(key) or ""))
+    for key in ("updatedAt", "lastUpdated", "createdAt", "timestamp", "eventTime", "time", "_time"):
+        raw = record.get(key)
+        if raw in (None, ""):
+            continue
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            value = float(raw)
+            if value < 1e12:
+                value *= 1000
+            return int(value)
+        text = str(raw).strip()
+        if text.isdigit() or (text.replace(".", "", 1).isdigit() and text.count(".") < 2):
+            value = float(text)
+            if value < 1e12:
+                value *= 1000
+            return int(value)
+        parsed = parse_iso_timestamp(text)
         if parsed is not None:
             return int(parsed.timestamp() * 1000)
     return fallback
@@ -71,8 +85,23 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
             build_event_dict(record, entity_type, event_time, event_time)
         )
         if entity_type == ENTITY_TYPE_ALERT:
-            for index, vega_event in enumerate(record.get("alert_events") or []):
-                child_time = _unix_ms(vega_event, event_time) if isinstance(vega_event, dict) else event_time
+            child_events = list(record.get("alert_events") or [])
+            if len(child_events) > MAX_EVENTS_PER_ALERT:
+                safe_log(
+                    logger_instance,
+                    "info",
+                    "Vega alert %s has %s events; attaching the first %s (SOAR per-alert cap).",
+                    identifier,
+                    len(child_events),
+                    MAX_EVENTS_PER_ALERT,
+                )
+                child_events = child_events[:MAX_EVENTS_PER_ALERT]
+            for index, vega_event in enumerate(child_events):
+                child_time = (
+                    _unix_ms(vega_event, event_time)
+                    if isinstance(vega_event, dict)
+                    else event_time
+                )
                 alert.events.append(
                     build_vega_alert_event_dict(
                         record, vega_event, child_time, child_time, index
@@ -82,8 +111,9 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
         safe_log(
             logger_instance,
             "info",
-            "Packaged Vega %s %s.",
+            "Packaged Vega %s %s with %s event(s).",
             entity_type,
             identifier,
+            len(alert.events),
         )
     return packages

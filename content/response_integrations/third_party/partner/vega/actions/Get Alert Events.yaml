@@ -7,7 +7,8 @@ parameters:
 -   name: Alert ID
     default_value: ''
     type: playbook_name
-    description: Vega alert UUID. Optional when running on a Vega alert.
+    description: Vega alert UUID (preferred) or vegaAlertId. Optional when running
+        on a Vega alert case.
     is_mandatory: false
 -   name: Limit
     default_value: '100'

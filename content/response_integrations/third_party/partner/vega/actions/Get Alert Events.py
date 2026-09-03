@@ -4,21 +4,6 @@ from soar_sdk.SiemplifyUtils import output_handler
 from soar_sdk.ScriptResult import EXECUTION_STATE_COMPLETED, EXECUTION_STATE_FAILED
 
 
-def _current_vega_id(siemplify):
-    try:
-        alert = siemplify.current_alert
-        events = getattr(alert, "security_events", None) or getattr(alert, "events", None) or []
-        for event in events:
-            additional = getattr(event, "additional_properties", None) or {}
-            for key in ("vega_id", "product_log_id"):
-                value = additional.get(key) if isinstance(additional, dict) else None
-                if value:
-                    return str(value)
-    except Exception:
-        return ""
-    return ""
-
-
 @output_handler
 def main():
     siemplify = SiemplifyAction()
@@ -29,16 +14,24 @@ def main():
         PARAM_ACCESS_KEY_ID,
         PARAM_API_ROOT,
     )
-    from ..core.utils import format_user_facing_error
+    from ..core.utils import format_user_facing_error, iter_current_vega_ids
     from ..core.VegaManager import VegaManager
 
     siemplify.script_name = GET_ALERT_EVENTS_SCRIPT_NAME
     alert_id = siemplify.extract_action_param("Alert ID", default_value="", print_value=True)
     limit = siemplify.extract_action_param("Limit", default_value="100")
     offset = siemplify.extract_action_param("Offset", default_value="0")
-    if not str(alert_id).strip():
-        alert_id = _current_vega_id(siemplify)
+    candidates = []
+    if str(alert_id).strip():
+        candidates.append(str(alert_id).strip())
+    else:
+        candidates.extend(iter_current_vega_ids(siemplify))
     try:
+        if not candidates:
+            raise ValueError(
+                "Alert ID is required. Enter the Vega alert UUID, or run this action "
+                "on a Vega Alert case."
+            )
         manager = VegaManager(
             api_root=siemplify.extract_configuration_param(INTEGRATION_NAME, PARAM_API_ROOT),
             access_key_id=siemplify.extract_configuration_param(INTEGRATION_NAME, PARAM_ACCESS_KEY_ID),
@@ -46,19 +39,32 @@ def main():
             logger_instance=siemplify.LOGGER,
         )
         page_size = int(limit or 100)
-        all_events = manager.get_all_alert_events(
-            str(alert_id).strip(),
-            page_size=page_size,
-        )
+        all_events = []
+        used_id = candidates[0]
+        last_error = None
+        fetched = False
+        for candidate in candidates:
+            try:
+                all_events = manager.get_all_alert_events(candidate, page_size=page_size)
+            except Exception as error:
+                last_error = error
+                continue
+            fetched = True
+            used_id = candidate
+            if all_events:
+                break
+        if not fetched:
+            raise last_error or ValueError("Unable to fetch Vega alert events.")
         result = {
             "total": len(all_events),
             "limit": page_size,
             "offset": int(offset or 0),
+            "alert_id": used_id,
             "results": all_events,
         }
         siemplify.result.add_result_json(result)
         siemplify.end(
-            f"Fetched {len(all_events)} Vega alert event(s) for {alert_id}.",
+            f"Fetched {len(all_events)} Vega alert event(s) for {used_id}.",
             True,
             EXECUTION_STATE_COMPLETED,
         )
