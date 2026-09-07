@@ -1,8 +1,18 @@
 """
 Vega Alerts and Incidents Connector.
 
-Polls Vega alerts/incidents into SOAR AlertInfo packages. Optional outbound
-sync closes matching Vega alerts or incidents when the SOAR case is closed.
+1. Read connector configuration (API, entities, filters, Has Related Incidents).
+2. IngestionPipeline applies those filters:
+   - Incidents+Alerts+Yes: incident alert plus related Vega alerts as alerts
+     on the same case (shared case title / Rule Generator, not Vega Alert vs
+     Vega Incident).
+   - Incidents+Alerts+No: incident-only case plus standalone unrelated alerts.
+   - Incidents only: Vega Incident cases only (no related or unrelated alerts).
+   - Alerts+Yes: one case per related Vega alert (no incident case).
+   - Alerts+No: one case per unrelated Vega alert.
+   Each packaged record is a SOAR alert inside its case.
+3. Packager turns records into SOAR AlertInfo objects. Optional outbound
+   sync closes the matching Vega incident or alert when the SOAR case closes.
 """
 from __future__ import annotations
 
@@ -65,12 +75,15 @@ def main(is_test_run: bool):
     siemplify.script_name = CONNECTOR_NAME
     alerts = []
     try:
+        # 1. Connector configuration: API credentials plus entity/filter params.
         manager = VegaManager(
             api_root=siemplify.extract_connector_param(param_name=PARAM_API_ROOT),
             access_key_id=siemplify.extract_connector_param(param_name=PARAM_ACCESS_KEY_ID),
             access_key=siemplify.extract_connector_param(param_name=PARAM_ACCESS_KEY),
             logger_instance=siemplify.LOGGER,
         )
+        # 2. Has Related Incidents is applied inside the pipeline together
+        #    with Vega Entities to Fetch (nest vs standalone vs skip).
         pipeline = IngestionPipeline(
             manager=manager,
             entities_raw=siemplify.extract_connector_param(
@@ -111,6 +124,7 @@ def main(is_test_run: bool):
         checkpoint = {} if is_test_run else _read_json(
             siemplify, _connector_id(siemplify), CHECKPOINT_PROPERTY_KEY
         )
+        # 3. Fetch/package records, then persist checkpoint and optional close-sync.
         summary = pipeline.run(checkpoint=checkpoint)
         alerts = create_alerts(summary.get("records") or [], siemplify, siemplify.LOGGER)
         siemplify.LOGGER.info(
@@ -149,7 +163,8 @@ def main(is_test_run: bool):
                     )
     except Exception as error:
         siemplify.LOGGER.error(format_user_facing_error(error))
-        alerts = []
+        # Keep any packages already built; wiping them is why cases disappear
+        # when a later step (checkpoint write or close-sync) fails.
     siemplify.return_package(alerts)
 
 

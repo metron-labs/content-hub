@@ -22,22 +22,45 @@ def _event_entity_type(event: dict) -> str:
     return ENTITY_TYPE_ALERT
 
 
-def extract_sync_targets(case_payload: dict) -> list[dict]:
+def _is_child_event_id(identifier: str) -> bool:
+    return ":event:" in identifier
+
+
+def extract_sync_targets(case_payload: dict) -> dict:
     events = case_payload.get("events") or case_payload.get("security_events") or []
-    targets = []
-    seen = set()
+    incident_ids: list[str] = []
+    alert_ids: list[str] = []
+    seen_incidents: set[str] = set()
+    seen_alerts: set[str] = set()
     for event in events:
-        identifier = _event_vega_id(event if isinstance(event, dict) else {})
-        if not identifier or identifier in seen:
+        payload = event if isinstance(event, dict) else {}
+        entity_type = _event_entity_type(payload)
+        if str(payload.get("vega_entity_type") or "").strip().lower() == "alert event":
+            incident_id = str(payload.get("vega_incident_id") or "").strip()
+            if incident_id and incident_id not in seen_incidents:
+                seen_incidents.add(incident_id)
+                incident_ids.append(incident_id)
             continue
-        seen.add(identifier)
-        targets.append(
-            {
-                "id": identifier,
-                "entity_type": _event_entity_type(event),
-            }
-        )
-    return targets
+        identifier = _event_vega_id(payload)
+        if not identifier or _is_child_event_id(identifier):
+            incident_id = str(payload.get("vega_incident_id") or "").strip()
+            if incident_id and incident_id not in seen_incidents:
+                seen_incidents.add(incident_id)
+                incident_ids.append(incident_id)
+            continue
+        incident_id = str(payload.get("vega_incident_id") or "").strip()
+        if incident_id and incident_id not in seen_incidents:
+            seen_incidents.add(incident_id)
+            incident_ids.append(incident_id)
+        if entity_type == ENTITY_TYPE_INCIDENT:
+            if identifier not in seen_incidents:
+                seen_incidents.add(identifier)
+                incident_ids.append(identifier)
+            continue
+        if identifier not in seen_alerts:
+            seen_alerts.add(identifier)
+            alert_ids.append(identifier)
+    return {"incidents": incident_ids, "alerts": alert_ids}
 
 
 def build_alert_sync_input(alert_ids: list[str]) -> dict:
@@ -84,26 +107,38 @@ class SoarRemediator:
             identifier = str(ticket_id).split(":", 1)[-1]
             if identifier in processed:
                 continue
-            entity_type = ENTITY_TYPE_ALERT
-            # ticket_id is Vega:<id>; entity type is recovered from case events when possible.
+            incident_ids: list[str] = []
+            alert_ids: list[str] = []
             getter = getattr(self.siemplify, "get_cases_by_ticket_id", None)
             if callable(getter):
                 try:
                     payload = getter(ticket_id) or {}
                     targets = extract_sync_targets(payload)
-                    if targets:
-                        entity_type = targets[0]["entity_type"]
-                        identifier = targets[0]["id"]
+                    incident_ids = list(targets.get("incidents") or [])
+                    alert_ids = list(targets.get("alerts") or [])
                 except Exception as exc:
                     safe_log(self.logger, "warning", "Case fetch failed for %s: %s", ticket_id, exc)
+            if not incident_ids and not alert_ids:
+                alert_ids = [identifier]
             try:
-                if entity_type == ENTITY_TYPE_INCIDENT:
-                    self.manager.update_incidents(build_incident_sync_input([identifier]))
-                else:
-                    self.manager.update_alerts(build_alert_sync_input([identifier]))
-                synced += 1
-                processed.add(identifier)
+                if incident_ids:
+                    pending_incidents = [item for item in incident_ids if item not in processed]
+                    if pending_incidents:
+                        self.manager.update_incidents(
+                            build_incident_sync_input(pending_incidents)
+                        )
+                        processed.update(pending_incidents)
+                        synced += 1
+                pending_alerts = [item for item in alert_ids if item not in processed]
+                if pending_alerts:
+                    self.manager.update_alerts(build_alert_sync_input(pending_alerts))
+                    processed.update(pending_alerts)
+                    if not incident_ids:
+                        synced += 1
+                if identifier not in processed:
+                    processed.add(identifier)
             except Exception as exc:
+                entity_type = ENTITY_TYPE_INCIDENT if incident_ids else ENTITY_TYPE_ALERT
                 safe_log(
                     self.logger,
                     "warning",

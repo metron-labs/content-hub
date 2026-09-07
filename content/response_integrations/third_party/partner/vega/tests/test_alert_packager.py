@@ -1,0 +1,157 @@
+"""Tests for AlertInfo packaging fields used by SOAR search and grouping."""
+from __future__ import annotations
+
+import sys
+from types import ModuleType, SimpleNamespace
+
+from core.constants import ENTITY_TYPE_ALERT, ENTITY_TYPE_INCIDENT
+from core.mapping import set_soar_meta
+
+
+class FakeAlertInfo:
+    def __init__(self) -> None:
+        self.events: list = []
+        self.extensions: dict = {}
+        self.case_tags = None
+        self.rule_generator = ""
+        self.device_product = ""
+        self.source_grouping_identifier = ""
+        self.name = ""
+        self.display_id = ""
+        self.ticket_id = ""
+        self.device_vendor = ""
+        self.device_event_class_id = ""
+        self.environment = ""
+        self.description = ""
+        self.start_time = 0
+        self.end_time = 0
+        self.Severity = ""
+        self.priority = 0
+
+
+def _install_fake_sdk() -> None:
+    soar_sdk = ModuleType("soar_sdk")
+    data_model = ModuleType("soar_sdk.SiemplifyConnectorsDataModel")
+    utils = ModuleType("soar_sdk.SiemplifyUtils")
+    data_model.AlertInfo = FakeAlertInfo
+    utils.unix_now = lambda: 1
+    sys.modules["soar_sdk"] = soar_sdk
+    sys.modules["soar_sdk.SiemplifyConnectorsDataModel"] = data_model
+    sys.modules["soar_sdk.SiemplifyUtils"] = utils
+
+
+def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
+    case_title = "Vega Incident - VINC-1 - Campaign"
+    incident = set_soar_meta(
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "VINC-1",
+            "name": "Campaign",
+            "createdAt": "2026-07-28T11:22:43Z",
+        },
+        grouping_id="Vega:incident:inc-1",
+        case_tags=["malware"],
+        case_title=case_title,
+        grouping_time="2026-07-28T11:22:43Z",
+        incident_id="inc-1",
+        is_incident_case=True,
+    )
+    related = set_soar_meta(
+        {
+            "id": "alert-1",
+            "vegaAlertId": "VALERT-1",
+            "name": "Phish",
+            "createdAt": "2026-04-05T01:18:35Z",
+            "alert_events": [{"name": "login"}],
+        },
+        grouping_id="Vega:incident:inc-1",
+        case_title=case_title,
+        grouping_time="2026-07-28T11:22:43Z",
+        incident_id="inc-1",
+        is_incident_case=True,
+    )
+    unrelated = set_soar_meta(
+        {"id": "alert-3", "vegaAlertId": "VALERT-3", "name": "Noise"},
+        grouping_id="Vega:alert:alert-3",
+        case_tags=[],
+        is_incident_case=False,
+    )
+    siemplify = SimpleNamespace(
+        context=SimpleNamespace(connector_info=SimpleNamespace(environment="Default"))
+    )
+    _install_fake_sdk()
+    from core.AlertPackager import create_alerts
+
+    packages = create_alerts(
+        [
+            (ENTITY_TYPE_INCIDENT, incident),
+            (ENTITY_TYPE_ALERT, related),
+            (ENTITY_TYPE_ALERT, unrelated),
+        ],
+        siemplify,
+    )
+    assert len(packages) == 3
+    incident_alert, related_alert, standalone = packages
+    assert incident_alert.rule_generator == case_title
+    assert related_alert.rule_generator == case_title
+    assert incident_alert.name.startswith("Vega Incident - VINC-1 - Campaign")
+    assert related_alert.name.startswith("Vega Alert - VALERT-1 - Phish")
+    assert "Vega Alert" not in incident_alert.rule_generator
+    assert "Vega Incident" != incident_alert.rule_generator
+    assert standalone.rule_generator.startswith("Vega Alert - VALERT-3 - Noise")
+    assert standalone.name.startswith("Vega Alert - VALERT-3 - Noise")
+    assert incident_alert.device_product == "Vega"
+    assert related_alert.device_product == "Vega"
+    assert standalone.device_product == "Vega"
+    assert incident_alert.source_grouping_identifier == "Vega:incident:inc-1"
+    assert related_alert.source_grouping_identifier == "Vega:incident:inc-1"
+    assert standalone.source_grouping_identifier == "Vega:alert:alert-3"
+    assert incident_alert.start_time == related_alert.start_time
+    assert incident_alert.case_tags == ["malware"]
+    assert standalone.case_tags is None
+    assert len(incident_alert.events) == 1
+    assert incident_alert.events[0]["name"].startswith("Vega Incident - VINC-1 - Campaign")
+    assert len(related_alert.events) == 2
+    assert related_alert.events[0]["name"].startswith("Vega Alert - VALERT-1 - Phish")
+    assert related_alert.events[1]["name"] == "login"
+    assert related_alert.events[0]["source_grouping_identifier"] == "Vega:incident:inc-1"
+    assert len(standalone.events) == 1
+
+
+def test_child_event_zero_timestamp_falls_back_to_parent() -> None:
+    from core.AlertPackager import _unix_ms
+
+    parent_ms = 1_700_000_000_000
+    assert _unix_ms({"time": 0, "_time": "0"}, parent_ms) == parent_ms
+    assert _unix_ms({"_time": 1_720_000_000}, parent_ms) == 1_720_000_000_000
+    assert _unix_ms({"createdAt": "2024-07-01T00:00:00Z"}, 1) == 1_719_792_000_000
+
+
+def test_overflow_incident_uses_unique_ticket_and_same_case_title() -> None:
+    overflow = set_soar_meta(
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "VINC-1",
+            "name": "Campaign",
+        },
+        grouping_id="Vega:incident:inc-1:part:2",
+        case_title="Vega Incident - VINC-1 - Campaign (part 2)",
+        ticket_suffix="part:2",
+        case_part=2,
+        is_incident_case=True,
+    )
+    siemplify = SimpleNamespace(
+        context=SimpleNamespace(connector_info=SimpleNamespace(environment="Default"))
+    )
+    _install_fake_sdk()
+    from core.AlertPackager import create_alerts
+
+    packages = create_alerts([(ENTITY_TYPE_INCIDENT, overflow)], siemplify)
+    assert len(packages) == 1
+    alert = packages[0]
+    assert alert.ticket_id == "Vega:inc-1:part:2"
+    assert alert.display_id == "Vega:inc-1:part:2"
+    assert alert.name.startswith("Vega Incident - VINC-1 - Campaign")
+    assert alert.device_product == "Vega"
+    assert alert.source_grouping_identifier == "Vega:incident:inc-1:part:2"
+    assert alert.rule_generator == "Vega Incident - VINC-1 - Campaign (part 2)"

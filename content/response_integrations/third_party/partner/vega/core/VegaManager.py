@@ -15,8 +15,10 @@ from .constants import (
     DEFAULT_HTTP_TIMEOUT,
     GET_ALERT_EVENTS_QUERY,
     GET_ALERTS_QUERY,
+    GET_ALERTS_QUERY_COMPAT,
     GET_INCIDENT_TIMELINE_QUERY,
     GET_INCIDENTS_QUERY,
+    GET_INCIDENTS_QUERY_COMPAT,
     GRAPHQL_PAGE_SIZE,
     LOGIN_PATH,
     MSG_BAD_REQUEST,
@@ -164,6 +166,8 @@ class VegaManager:
         )
         self._sleeper = sleeper or __import__("time").sleep
         self._jwt: Optional[str] = None
+        self._alerts_query = GET_ALERTS_QUERY
+        self._incidents_query = GET_INCIDENTS_QUERY
 
     def _log(self, level: str, msg: str, *args) -> None:
         safe_log(self.logger, level, msg, *args)
@@ -309,7 +313,9 @@ class VegaManager:
             classified = classify_credential_error(message)
             if classified:
                 raise VegaUnauthorizedException(classified)
-            raise VegaException("Vega request failed. Please try again.")
+            detail = str(message or "").strip() or "Vega request failed. Please try again."
+            self._log("error", "Vega GraphQL error: %s", detail)
+            raise VegaException(detail)
         return payload.get("data") or {}
 
     def test_connection(self) -> bool:
@@ -372,14 +378,45 @@ class VegaManager:
         return collected
 
     def get_alerts(self, variables: dict, max_records: Optional[int] = None) -> list:
-        return self._paged(
-            GET_ALERTS_QUERY, "getAlerts", "alerts", variables, max_records
-        )
+        """Page getAlerts. Pass alertIds to resolve incident-related alerts.
+
+        The full query is tried first. If Vega rejects it (unknown field/type),
+        later calls use the compatible query so ingest can still create cases.
+        """
+        try:
+            return self._paged(
+                self._alerts_query, "getAlerts", "alerts", variables, max_records
+            )
+        except VegaException as exc:
+            if self._alerts_query is GET_ALERTS_QUERY_COMPAT:
+                raise
+            self._log(
+                "warning",
+                "Full getAlerts query failed (%s); retrying with compatible query.",
+                exc,
+            )
+            self._alerts_query = GET_ALERTS_QUERY_COMPAT
+            return self._paged(
+                self._alerts_query, "getAlerts", "alerts", variables, max_records
+            )
 
     def get_incidents(self, variables: dict, max_records: Optional[int] = None) -> list:
-        return self._paged(
-            GET_INCIDENTS_QUERY, "getIncidents", "incidents", variables, max_records
-        )
+        try:
+            return self._paged(
+                self._incidents_query, "getIncidents", "incidents", variables, max_records
+            )
+        except VegaException as exc:
+            if self._incidents_query is GET_INCIDENTS_QUERY_COMPAT:
+                raise
+            self._log(
+                "warning",
+                "Full getIncidents query failed (%s); retrying without nested vegaAlertId.",
+                exc,
+            )
+            self._incidents_query = GET_INCIDENTS_QUERY_COMPAT
+            return self._paged(
+                self._incidents_query, "getIncidents", "incidents", variables, max_records
+            )
 
     def get_alert_events(
         self, alert_id: str, limit: int = ALERT_EVENTS_PAGE_SIZE, offset: int = 0

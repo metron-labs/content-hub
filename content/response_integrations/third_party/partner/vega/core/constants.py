@@ -7,6 +7,9 @@ PRODUCT_NAME = "Vega"
 VENDOR_NAME = "Vega"
 ENTITY_TYPE_ALERT = "Alert"
 ENTITY_TYPE_INCIDENT = "Incident"
+SOAR_ALERT_TYPE_ALERT = "Vega Alert"
+SOAR_ALERT_TYPE_INCIDENT = "Vega Incident"
+SOAR_META_KEY = "_soar_meta"
 
 PING_SCRIPT_NAME = f"{INTEGRATION_NAME} - Ping"
 GET_ALERT_EVENTS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Alert Events"
@@ -34,6 +37,16 @@ GRAPHQL_PAGE_SIZE = 50
 ALERT_EVENTS_PAGE_SIZE = 100
 ALERT_EVENTS_MAX_FETCH = 2500
 MAX_EVENTS_PER_ALERT = 200
+# Nested related Vega alerts are attached as events on the incident AlertInfo
+# (SOAR creates one case per AlertInfo unless grouping is enabled).
+NESTED_RELATED_KEY = "nested_related_alerts"
+# Google SecOps hard cap is 90 alerts per case (default grouping is 20).
+# Used here to chunk related-alert events onto overflow incident packages.
+MAX_ALERTS_PER_CASE = 90
+ALERT_ID_LOOKUP_BATCH = 10
+# getAlertsEvents is one HTTP call per alert. A large incident (800+ alerts)
+# will 429 / GraphQL-fail if we fetch events for every related alert in one run.
+MAX_ALERT_EVENT_FETCHES_PER_CYCLE = 25
 TIMELINE_PAGE_SIZE = 100
 TIMELINE_MAX_FETCH = 2500
 TEST_RUN_MAX_FETCH = 5
@@ -43,9 +56,12 @@ RATE_LIMIT_STEP_SECONDS = 2
 SERVER_ERROR_RETRIES = 3
 SERVER_ERROR_WAIT_SECONDS = 2
 INGESTED_ID_CAP = 5000
+# getAlerts(alertIds) needs a time bound; related alerts can be older than the
+# ingest window, so ID lookups use this createdAt/updatedAt floor.
+ALERT_ID_LOOKUP_FROM = "2015-01-01T00:00:00.000Z"
 PYTHON_PROCESS_TIMEOUT_DEFAULT = "930"
 
-INTEGRATION_VERSION = 2
+INTEGRATION_VERSION = 3
 DOCUMENTATION_LINK = "https://vega.io"
 
 PARAM_API_ROOT = "API Root"
@@ -112,8 +128,13 @@ MSG_TIMEOUT = (
 )
 MSG_UNREACHABLE = MSG_INVALID_API_ROOT
 
-GET_ALERTS_QUERY = """
+# Compatible getAlerts: the original working selection set plus alertIds so the
+# Yes path can resolve incident-related alerts. Used when the full query is
+# rejected by the Vega schema (unknown field/type) so cases still ingest.
+GET_ALERTS_QUERY_COMPAT = """
 query GetAlerts(
+  $alertIds: [ID!],
+  $vegaAlertIds: [String!],
   $alertSeverities: [AlertSeverity!],
   $statuses: [AlertStatus!],
   $alertVerdicts: [AlertVerdict!],
@@ -126,6 +147,8 @@ query GetAlerts(
   $offset: Int
 ) {
   getAlerts(
+    alertIds: $alertIds,
+    vegaAlertIds: $vegaAlertIds,
     alertSeverities: $alertSeverities,
     statuses: $statuses,
     alertVerdicts: $alertVerdicts,
@@ -171,6 +194,95 @@ query GetAlerts(
 }
 """.strip()
 
+# Full getAlerts query. The Yes path passes alertIds collected from getIncidents.
+# The No path passes hasRelatedIncidents=false plus the connector time/filters.
+GET_ALERTS_QUERY = """
+query GetAlerts(
+  $alertNames: [String!],
+  $alertIds: [ID!],
+  $vegaAlertIds: [String!],
+  $alertSeverities: [AlertSeverity!],
+  $statuses: [AlertStatus!],
+  $detectionIds: [ID!],
+  $dataSourceNames: [String!],
+  $alertVerdicts: [AlertVerdict!],
+  $hasRelatedIncidents: Boolean,
+  $from: Time,
+  $to: Time,
+  $updatedFrom: Time,
+  $updatedTo: Time,
+  $originType: AlertOriginType,
+  $sortBy: AlertSortFieldPublic,
+  $sortOrder: SortOrderPublic,
+  $limit: Int,
+  $offset: Int
+) {
+  getAlerts(
+    alertNames: $alertNames,
+    alertIds: $alertIds,
+    vegaAlertIds: $vegaAlertIds,
+    alertSeverities: $alertSeverities,
+    statuses: $statuses,
+    detectionIds: $detectionIds,
+    dataSourceNames: $dataSourceNames,
+    alertVerdicts: $alertVerdicts,
+    hasRelatedIncidents: $hasRelatedIncidents,
+    from: $from,
+    to: $to,
+    updatedFrom: $updatedFrom,
+    updatedTo: $updatedTo,
+    originType: $originType,
+    sortBy: $sortBy,
+    sortOrder: $sortOrder,
+    limit: $limit,
+    offset: $offset
+  ) {
+    alerts {
+      id
+      vegaAlertId
+      detectionId
+      name
+      description
+      severity
+      status
+      assignee { userId displayName email }
+      assignees { userId displayName email }
+      dataSources
+      createdAt
+      updatedAt
+      mitre { mitreTactics mitreTechniques }
+      relatedIncidents { incidentId name }
+      detectionSource
+      detectionDescription
+      detectionQuery
+      eventCount
+      isTestMode
+      verdict
+      verdictReasoning
+      escalation {
+        status
+        reasoning
+        determinedAt
+        incident { incidentId name }
+      }
+      dedupCount
+      comments { text addedBy addedAt }
+      labels { id categoryId name color usageCount }
+      skills { id name version }
+      actors { field values }
+      targets { field values }
+      href
+    }
+    total
+    limit
+    offset
+    error { code message }
+  }
+}
+""".strip()
+
+# Incident list used by the Yes path. `alerts { alertId ... }` is the source of
+# related alert IDs passed into GET_ALERTS_QUERY.
 GET_INCIDENTS_QUERY = """
 query GetIncidents(
   $incidentNames: [String!],
@@ -228,7 +340,7 @@ query GetIncidents(
       assets
       observables
       alertsCount
-      alerts { alertId name createdAt }
+      alerts { alertId vegaAlertId name createdAt }
       recommendedActions { name description actionKey targetParams }
       investigationPlan {
         stepName
@@ -247,6 +359,11 @@ query GetIncidents(
   }
 }
 """.strip()
+
+GET_INCIDENTS_QUERY_COMPAT = GET_INCIDENTS_QUERY.replace(
+    "alerts { alertId vegaAlertId name createdAt }",
+    "alerts { alertId name createdAt }",
+)
 
 GET_ALERT_EVENTS_QUERY = """
 query GetAlertsEvents($alertId: ID!, $limit: Int, $offset: Int) {

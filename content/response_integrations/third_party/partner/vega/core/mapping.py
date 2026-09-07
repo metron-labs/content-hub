@@ -10,6 +10,9 @@ from .constants import (
     ENTITY_TYPE_ALERT,
     ENTITY_TYPE_INCIDENT,
     SEVERITY_TO_ALERT_PRIORITY,
+    SOAR_ALERT_TYPE_ALERT,
+    SOAR_ALERT_TYPE_INCIDENT,
+    SOAR_META_KEY,
     VENDOR_NAME,
 )
 
@@ -34,6 +37,14 @@ _SKIP_PAYLOAD_KEYS = {
     "event_class_id",
     "DeviceEventClassID",
     "Severity",
+    "time",
+    "Time",
+    "_time",
+    "timestamp",
+    "eventTime",
+    "event_time",
+    "datetime",
+    "date",
 }
 _ENTITY_ALIASES = {
     "src_ip": "ip",
@@ -78,6 +89,19 @@ def _safe_json(value: Any) -> str:
         return str(value)
 
 
+def soar_meta(record: dict) -> dict:
+    meta = record.get(SOAR_META_KEY) if isinstance(record, dict) else None
+    return dict(meta) if isinstance(meta, dict) else {}
+
+
+def set_soar_meta(record: dict, **fields: Any) -> dict:
+    updated = dict(record or {})
+    meta = soar_meta(updated)
+    meta.update({key: value for key, value in fields.items() if value is not None})
+    updated[SOAR_META_KEY] = meta
+    return updated
+
+
 def record_id(record: dict, entity_type: str) -> str:
     if entity_type == ENTITY_TYPE_INCIDENT:
         return str(
@@ -85,7 +109,12 @@ def record_id(record: dict, entity_type: str) -> str:
             or record.get("incidentId")
             or ""
         ).strip()
-    return str(record.get("id") or record.get("vegaAlertId") or "").strip()
+    return str(
+        record.get("id")
+        or record.get("vegaAlertId")
+        or record.get("alertId")
+        or ""
+    ).strip()
 
 
 def record_alert_ids(record: dict) -> list[str]:
@@ -99,28 +128,168 @@ def record_alert_ids(record: dict) -> list[str]:
 
 
 def record_display_id(record: dict, entity_type: str) -> str:
-    """Human-facing Vega ID used in the SOAR case title."""
+    """Human-facing Vega ID used in the SOAR alert/case title.
+
+    Vega Alert names use vegaAlertId only (never the UUID id/alertId).
+    """
     if entity_type == ENTITY_TYPE_INCIDENT:
         return str(
             record.get("vegaUniqueIncidentId")
-            or record.get("id")
             or record.get("incidentId")
             or ""
         ).strip()
-    return str(record.get("vegaAlertId") or record.get("id") or "").strip()
+    return str(record.get("vegaAlertId") or "").strip()
 
 
 def record_name(record: dict) -> str:
     return str(record.get("name") or record.get("incidentName") or "Vega record").strip()
 
-# TODO: Need to remove the manually change of the case display name
 def case_display_name(record: dict, entity_type: str) -> str:
-    """SOAR case title: Vega Alert - <vegaAlertId> - <name>."""
+    """Human-readable SOAR alert/case title: Vega {entity} - {display_id} - {name}.
+
+    Alert Type in SOAR search is rule_generator. For incident-case members the
+    packager sets Rule Generator to the incident case title and Name to this
+    per-record title (Vega Incident vs Vega Alert).
+    """
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} - TEST-13"
-    return f"Vega {entity_type} - {name} - TEST-13"
+        return f"Vega {entity_type} - {display_id} - {name} TEST 28"
+    return f"Vega {entity_type} - {name} TEST 28"
+
+
+def incident_case_title(record: dict, case_part: int = 1) -> str:
+    """Shared SOAR case title for an incident and its nested related alerts."""
+    title = case_display_name(record, ENTITY_TYPE_INCIDENT)
+    if case_part and case_part > 1:
+        return f"{title} (part {case_part})"
+    return title
+
+
+def incident_grouping_id(incident_id: str, case_part: int = 1) -> str:
+    """SOAR source grouping key. Overflow cases use :part:N so they stay separate."""
+    base = f"{VENDOR_NAME}:incident:{incident_id}"
+    if case_part and case_part > 1:
+        return f"{base}:part:{case_part}"
+    return base
+
+
+def alert_grouping_id(alert_id: str) -> str:
+    return f"{VENDOR_NAME}:alert:{alert_id}"
+
+
+def record_label_tags(record: dict) -> list[str]:
+    """SOAR case tags from Vega incident labels. Reuses existing tag names."""
+    tags: list[str] = []
+    seen: set[str] = set()
+    labels = record.get("labels") if isinstance(record, dict) else None
+    if isinstance(labels, str) and labels.strip():
+        labels = [labels]
+    if not isinstance(labels, list):
+        return tags
+    for item in labels:
+        name = ""
+        if isinstance(item, str):
+            name = item.strip()
+        elif isinstance(item, dict):
+            name = str(item.get("name") or item.get("label") or "").strip()
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        tags.append(name)
+    return tags
+
+
+def incident_alert_stubs(incident: dict) -> list[dict]:
+    raw = incident.get("alerts") if isinstance(incident, dict) else None
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    stubs: list[dict] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            stubs.append({"alertId": item.strip(), "id": item.strip()})
+        elif isinstance(item, dict):
+            stubs.append(item)
+    return stubs
+
+
+def incident_alert_ids(incident: dict) -> list[str]:
+    """Unique alert IDs from getIncidents `alerts { alertId name createdAt }`."""
+    ids: list[str] = []
+    seen: set[str] = set()
+    for stub in incident_alert_stubs(incident):
+        for key in record_alert_ids(stub):
+            if key not in seen:
+                seen.add(key)
+                ids.append(key)
+    return ids
+
+
+def chunk_case_alerts(related_alerts: list, max_alerts_per_case: int) -> list[list]:
+    """Split related alerts so each SOAR case stays within the 90-alert cap.
+
+    First case reserves 1 slot for the Vega incident alert, so it holds
+    (max - 1) related alerts. Overflow cases are related alerts only and
+    hold `max` alerts each. Zero related alerts still yields one empty
+    chunk (incident-only case).
+    """
+    limit = max(1, int(max_alerts_per_case))
+    first_cap = max(1, limit - 1)
+    if not related_alerts:
+        return [[]]
+    first = list(related_alerts[:first_cap])
+    rest = list(related_alerts[first_cap:])
+    chunks = [first]
+    for index in range(0, len(rest), limit):
+        chunks.append(list(rest[index : index + limit]))
+    return chunks
+
+
+def stub_to_alert(stub: dict) -> dict:
+    alert_id = str(
+        stub.get("alertId") or stub.get("id") or stub.get("vegaAlertId") or ""
+    ).strip()
+    return {
+        "id": alert_id,
+        "alertId": alert_id,
+        "vegaAlertId": str(stub.get("vegaAlertId") or "").strip(),
+        "name": stub.get("name") or "Vega alert",
+        "createdAt": stub.get("createdAt") or "",
+        "updatedAt": stub.get("updatedAt") or stub.get("createdAt") or "",
+        "severity": stub.get("severity") or "MEDIUM",
+        "status": stub.get("status") or "",
+        "description": stub.get("description") or "",
+    }
+
+
+def related_incident_ref(alert: dict) -> tuple[str, str]:
+    related = alert.get("relatedIncidents") if isinstance(alert, dict) else None
+    if isinstance(related, dict):
+        related = [related]
+    if not isinstance(related, list):
+        return "", ""
+    for item in related:
+        if not isinstance(item, dict):
+            continue
+        identifier = str(item.get("incidentId") or item.get("id") or "").strip()
+        if identifier:
+            return identifier, str(item.get("name") or "").strip()
+    return "", ""
+
+
+def index_alert_records(alerts: list[dict]) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    for alert in alerts:
+        if not isinstance(alert, dict):
+            continue
+        for key in record_alert_ids(alert):
+            index[key] = alert
+    return index
 
 
 def record_severity(record: dict) -> str:
@@ -223,20 +392,47 @@ def _details_payload(record: dict) -> str:
     """JSON snapshot of the Vega record without duplicating child events."""
     if not isinstance(record, dict):
         return _safe_json(record)
-    trimmed = {key: value for key, value in record.items() if key != "alert_events"}
+    trimmed = {
+        key: value
+        for key, value in record.items()
+        if key not in (SOAR_META_KEY, "alert_events", "nested_related_alerts")
+    }
     return _soar_value(trimmed, limit=_MAX_DETAILS_CHARS)
 
 
 def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: int) -> dict:
     identifier = record_id(record, entity_type)
     severity = record_severity(record)
+    meta = soar_meta(record)
+    incident_id = str(
+        meta.get("incident_id")
+        or record.get("vega_incident_id")
+        or ""
+    ).strip()
+    incident_display_id = str(
+        meta.get("incident_display_id")
+        or record.get("vegaUniqueIncidentId")
+        or ""
+    ).strip()
+    soar_alert_type = str(
+        meta.get("soar_alert_type")
+        or (
+            SOAR_ALERT_TYPE_INCIDENT
+            if entity_type == ENTITY_TYPE_INCIDENT
+            else SOAR_ALERT_TYPE_ALERT
+        )
+    )
+    grouping_id = str(meta.get("grouping_id") or "")
     event = {
         "StartTime": start_time,
         "EndTime": end_time,
+        "start_time": start_time,
+        "end_time": end_time,
         "name": case_display_name(record, entity_type),
         "device_vendor": VENDOR_NAME,
         "device_product": DEVICE_PRODUCT,
         "product": DEVICE_PRODUCT,
+        "source_grouping_identifier": grouping_id,
         "event_type": entity_type,
         "product_log_id": identifier,
         "vega_id": identifier,
@@ -251,8 +447,10 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
         "created_at": str(record.get("createdAt") or ""),
         "updated_at": record_timestamp(record),
         "vega_entity_type": entity_type,
+        "vega_soar_alert_type": soar_alert_type,
         "vega_alert_id": str(record.get("vegaAlertId") or ""),
-        "vega_unique_incident_id": str(record.get("vegaUniqueIncidentId") or ""),
+        "vega_incident_id": incident_id,
+        "vega_unique_incident_id": incident_display_id,
         "vega_comments": _safe_json(record.get("comments") or []),
         "vega_recommended_actions": _safe_json(record.get("recommendedActions") or []),
         "vega_investigation_plan": _safe_json(record.get("investigationPlan") or []),
@@ -326,17 +524,24 @@ def build_vega_alert_event_dict(
         or payload.get("sourcetype")
         or f"Vega Alert Event {index + 1}"
     ).strip()
+    meta = soar_meta(parent)
+    incident_id = str(meta.get("incident_id") or parent.get("vega_incident_id") or "").strip()
+    grouping_id = str(meta.get("grouping_id") or "")
     event = {
         "StartTime": start_time,
         "EndTime": end_time,
+        "start_time": start_time,
+        "end_time": end_time,
         "name": name,
         "device_vendor": VENDOR_NAME,
         "device_product": DEVICE_PRODUCT,
         "product": DEVICE_PRODUCT,
+        "source_grouping_identifier": grouping_id,
         "event_type": "Alert Event",
         "product_log_id": event_key,
         "vega_id": identifier,
         "vega_alert_id": str(parent.get("vegaAlertId") or ""),
+        "vega_incident_id": incident_id,
         "event_class_id": event_key,
         "DeviceEventClassID": event_key,
         "Severity": record_severity(parent),

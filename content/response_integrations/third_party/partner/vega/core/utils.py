@@ -256,6 +256,8 @@ def resolve_entities(raw: Any) -> list[str]:
             f"{PARAM_ENTITIES} is required. Use one or both of: {', '.join(ENTITY_OPTIONS)}."
         )
     known = {item.lower(): item for item in ENTITY_OPTIONS}
+    known["alert"] = "Alerts"
+    known["incident"] = "Incidents"
     resolved = []
     unknown = []
     for item in selected:

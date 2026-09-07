@@ -1,3 +1,13 @@
+-   description: Map Vega incidents to SOAR cases named Vega Incident - id - name
+        that include a Vega Incident alert plus related Vega Alert alerts (split
+        across cases when over the 90-alert cap), keep Alert Type as Vega Incident
+        or Vega Alert, apply incident labels as tags, and map event Start/End times
+        so alert events are not epoch.
+    version: 2.0
+    item_name: Vega
+    item_type: Integration
+    publish_time: '2026-09-03'
+    ticket_number: No ticket
 -   description: Updated Get Incidents, Get Alert Events, and Get Incident Timeline
         queries, included Vega IDs in case names, and fetched all paginated alert
         and timeline events.

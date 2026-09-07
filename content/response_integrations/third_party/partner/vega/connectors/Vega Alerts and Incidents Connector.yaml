@@ -27,8 +27,13 @@ parameters:
 -   name: Vega Entities to Fetch
     default_value: Alerts,Incidents
     type: string
-    description: 'Possible Values: Alerts, Incidents. At least one is required. Unsupported
-        values cause a configuration error.'
+    description: 'Possible Values: Alerts, Incidents (singular Alert or Incident is
+        also accepted). Combined with Has Related Incidents: Incidents+Alerts nests
+        related alerts inside the Vega Incident case and creates separate cases for
+        unrelated alerts when No is selected. Incidents only creates Vega Incident
+        cases (no related or unrelated alerts). Alerts only creates one case per
+        Vega alert. At least one is required. Unsupported values cause a configuration
+        error.'
     is_mandatory: true
     is_advanced: false
     mode: script
@@ -42,7 +47,7 @@ parameters:
     is_advanced: false
     mode: script
 -   name: Max Days Backwards
-    default_value: '30'
+    default_value: '130'
     type: string
     description: Days to backfill on the first run only. Enter an integer from 0 to
         365 (0 starts from today). Invalid values cause a configuration error.
@@ -76,8 +81,12 @@ parameters:
 -   name: Has Related Incidents
     default_value: Yes,No
     type: string
-    description: 'Possible Values: Yes, No. Select both to fetch all alerts. At least
-        one is required. Unsupported values cause a configuration error.'
+    description: 'Possible Values: Yes, No. Applies when Alerts are selected. Yes
+        loads related Vega alerts: nested inside the incident case when Incidents
+        is also selected, or as their own cases when only Alerts is selected. No
+        loads unrelated Vega alerts as one SOAR case each and does not nest related
+        alerts inside incident cases. Select both to run both flows. At least one
+        is required. Unsupported values cause a configuration error.'
     is_mandatory: true
     is_advanced: false
     mode: script
@@ -110,8 +119,8 @@ parameters:
 -   name: Sync Case Close to Vega
     default_value: 'true'
     type: boolean
-    description: When true, close the matching Vega alert or incident when the SOAR
-        case is closed.
+    description: When true, close the matching Vega incident (and its related alerts)
+        or standalone Vega alert when the SOAR case is closed.
     is_mandatory: false
     is_advanced: true
     mode: script
@@ -138,8 +147,18 @@ parameters:
     is_mandatory: true
     is_advanced: false
     mode: regular
-description: Pull alerts and incidents from Vega. Dynamic List is not used. Set Run
-    Every to 5 minutes unless the tenant requires otherwise.
+description: 'Pull Vega incidents as SOAR cases named Vega Incident - <display
+    id> - <name>. When Alerts and Has Related Incidents=Yes are also selected,
+    related Vega alerts are created as alerts on that same case. The first case
+    has 1 Vega incident alert plus up to 89 related alerts (each with Vega alert
+    events). Extra related alerts go to overflow cases of up to 90 related alerts
+    each (the incident alert is not copied). Related alerts keep their own Name
+    (Vega Alert - id - name). They share Product Vega, grouping id, and Rule
+    Generator (the incident case title). Add an Alerts Grouping rule for Product
+    Vega, Group By Source Grouping Identifier (same pattern as Wiz_Defend), above
+    All alerts. Without that rule SOAR creates one case per Vega alert. Set Case
+    Name to Rule Generator. Dynamic List is not used. Set Run Every to 5 minutes
+    unless the tenant requires otherwise.'
 integration: Vega
 documentation_link: https://vega.io/
 rules: []
