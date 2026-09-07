@@ -116,6 +116,126 @@ def test_summary_event_carries_incident_id_and_alert_type() -> None:
     assert "_soar_meta" not in event["details"]
 
 
+_EMPTY_API_KEYS = (
+    "status",
+    "verdict",
+    "verdict_reasoning",
+    "description",
+    "source_url",
+    "created_at",
+    "updated_at",
+    "vega_incident_id",
+    "vega_unique_incident_id",
+    "comments",
+    "labels",
+    "skills",
+    "recommended_actions",
+    "investigation_plan",
+    "timeline",
+    "observables",
+    "assets",
+    "vega_entities",
+    "vega_alert_events_count",
+    "vega_comments",
+    "vega_labels",
+    "vega_skills",
+    "vega_recommended_actions",
+    "vega_investigation_plan",
+    "vega_timeline",
+    "vega_observables",
+    "vega_assets",
+)
+
+
+def test_alert_event_omits_missing_api_fields() -> None:
+    event = build_event_dict(
+        {"id": "alert-1", "vegaAlertId": "VALERT-1", "name": "Phish"},
+        ENTITY_TYPE_ALERT,
+        1,
+        1,
+    )
+    assert event["vega_alert_id"] == "VALERT-1"
+    for key in _EMPTY_API_KEYS:
+        assert key not in event, key
+
+
+def test_alert_event_maps_get_alerts_fields() -> None:
+    event = build_event_dict(
+        {
+            "id": "alert-1",
+            "vegaAlertId": "VALERT-1",
+            "name": "Phish",
+            "description": "Click",
+            "severity": "HIGH",
+            "status": "OPEN",
+            "detectionId": "det-1",
+            "dataSources": ["splunk"],
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-02T00:00:00Z",
+            "verdict": "MALICIOUS",
+            "verdictReasoning": "because",
+            "eventCount": 3,
+            "href": "https://vega.example/alerts/1",
+            "comments": [{"text": "hi"}],
+            "labels": [{"name": "phish"}],
+            "relatedIncidents": [{"incidentId": "inc-1", "name": "Campaign"}],
+        },
+        ENTITY_TYPE_ALERT,
+        1,
+        1,
+    )
+    assert event["detection_id"] == "det-1"
+    assert event["event_count"] == "3"
+    assert event["verdict"] == "MALICIOUS"
+    assert event["source_url"] == "https://vega.example/alerts/1"
+    assert "recommended_actions" not in event
+    assert "investigation_plan" not in event
+    assert "observables" not in event
+    assert "assets" not in event
+    assert "vega_entities" not in event
+
+
+def test_incident_event_maps_get_incidents_fields() -> None:
+    event = build_event_dict(
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "VINC-1",
+            "name": "Campaign",
+            "incidentSummary": "summary",
+            "incidentFindings": "findings",
+            "status": "NEW",
+            "severity": "HIGH",
+            "recommendedActions": [{"name": "block"}],
+            "investigationPlan": [{"stepName": "scope"}],
+            "observables": ["1.1.1.1"],
+            "assets": ["host-1"],
+            "alertsCount": 2,
+            "createdBy": "analyst",
+            "link": "https://vega.example/incidents/1",
+            "timeline": [{"summary": "opened"}],
+        },
+        ENTITY_TYPE_INCIDENT,
+        1,
+        1,
+    )
+    assert event["vega_unique_incident_id"] == "VINC-1"
+    assert event["description"] == "summary"
+    assert event["incident_findings"] == "findings"
+    assert event["created_by"] == "analyst"
+    assert event["source_url"] == "https://vega.example/incidents/1"
+    assert "vega_alert_id" not in event
+    assert "detection_id" not in event
+    assert "event_count" not in event
+    assert "recommended_actions" in event
+    assert "investigation_plan" in event
+    assert "observables" in event
+    assert "assets" in event
+    assert "timeline" in event
+    assert "vega_entities" not in event
+    for key in ("vega_recommended_actions", "vega_investigation_plan", "vega_observables"):
+        assert key not in event, key
+
+
 def test_child_events_stay_scoped_to_parent_alert() -> None:
     parent = set_soar_meta(
         {"id": "alert-1", "vegaAlertId": "VALERT-1"},
@@ -128,6 +248,35 @@ def test_child_events_stay_scoped_to_parent_alert() -> None:
     assert event["vega_id"] == "alert-1"
     assert event["vega_incident_id"] == "inc-1"
     assert event["vega_entity_type"] == "Alert Event"
+
+
+def test_alert_event_payload_maps_dynamic_api_fields() -> None:
+    event = build_vega_alert_event_dict(
+        {"id": "alert-1", "vegaAlertId": "VALERT-1"},
+        {
+            "name": "login",
+            "src_ip": "1.1.1.1",
+            "custom_field": "abc",
+            "empty_field": "",
+            "null_field": None,
+            "empty_list": [],
+            "nested": {"user": "bob", "host": "ws1"},
+        },
+        1,
+        1,
+        0,
+    )
+    assert event["src_ip"] == "1.1.1.1"
+    assert event["custom_field"] == "abc"
+    assert event["user"] == "bob"
+    assert event["host"] == "ws1"
+    assert event["ip"] == "1.1.1.1"
+    assert event["vega_alert_id"] == "VALERT-1"
+    assert "empty_field" not in event
+    assert "null_field" not in event
+    assert "empty_list" not in event
+    assert "vega_incident_id" not in event
+    assert "source_grouping_identifier" not in event
 
 
 def test_extract_sync_targets_prefers_incident_and_skips_child_events() -> None:

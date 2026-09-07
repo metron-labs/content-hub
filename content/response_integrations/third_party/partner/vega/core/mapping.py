@@ -154,8 +154,8 @@ def case_display_name(record: dict, entity_type: str) -> str:
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} TEST 28"
-    return f"Vega {entity_type} - {name} TEST 28"
+        return f"Vega {entity_type} - {display_id} - {name} TEST 32"
+    return f"Vega {entity_type} - {name} TEST 32"
 
 
 def incident_case_title(record: dict, case_part: int = 1) -> str:
@@ -378,10 +378,33 @@ def _soar_value(value: Any, *, limit: int = _MAX_EVENT_FIELD_CHARS) -> str:
     return text
 
 
+def _has_mapped_value(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, (list, dict)) and not value:
+        return False
+    return True
+
+
+def _set_mapped(event: dict, key: str, value: Any) -> None:
+    if not key or key in event or not _has_mapped_value(value):
+        return
+    event[key] = _soar_value(value)
+
+
+def _map_api_fields(event: dict, record: dict, fields: tuple[tuple[str, str], ...]) -> None:
+    if not isinstance(record, dict):
+        return
+    for api_key, event_key in fields:
+        if api_key not in record:
+            continue
+        _set_mapped(event, event_key, record.get(api_key))
+
+
 def _apply_entity_aliases(event: dict, payload: dict) -> None:
     for key, value in payload.items():
         bucket = _ENTITY_ALIASES.get(str(key).strip().lower())
-        if not bucket or bucket in event or value in (None, ""):
+        if not bucket or bucket in event or not _has_mapped_value(value):
             continue
         if isinstance(value, (dict, list)):
             continue
@@ -396,11 +419,79 @@ def _details_payload(record: dict) -> str:
         key: value
         for key, value in record.items()
         if key not in (SOAR_META_KEY, "alert_events", "nested_related_alerts")
+        and _has_mapped_value(value)
     }
+    if not trimmed:
+        return ""
     return _soar_value(trimmed, limit=_MAX_DETAILS_CHARS)
 
 
+# Selection set from GET_ALERTS_QUERY `alerts { ... }`.
+_ALERT_API_FIELDS = (
+    ("vegaAlertId", "vega_alert_id"),
+    ("detectionId", "detection_id"),
+    ("description", "description"),
+    ("status", "status"),
+    ("assignee", "assignee"),
+    ("assignees", "assignees"),
+    ("dataSources", "data_sources"),
+    ("createdAt", "created_at"),
+    ("updatedAt", "updated_at"),
+    ("mitre", "mitre"),
+    ("relatedIncidents", "related_incidents"),
+    ("detectionSource", "detection_source"),
+    ("detectionDescription", "detection_description"),
+    ("detectionQuery", "detection_query"),
+    ("eventCount", "event_count"),
+    ("isTestMode", "is_test_mode"),
+    ("verdict", "verdict"),
+    ("verdictReasoning", "verdict_reasoning"),
+    ("escalation", "escalation"),
+    ("dedupCount", "dedup_count"),
+    ("comments", "comments"),
+    ("labels", "labels"),
+    ("skills", "skills"),
+    ("actors", "actors"),
+    ("targets", "targets"),
+    ("href", "source_url"),
+)
+
+# Selection set from GET_INCIDENTS_QUERY `incidents { ... }`, plus timeline
+# enrichment from getIncidentTimeline.
+_INCIDENT_API_FIELDS = (
+    ("vegaUniqueIncidentId", "vega_unique_incident_id"),
+    ("createdBy", "created_by"),
+    ("createdAt", "created_at"),
+    ("lastUpdated", "updated_at"),
+    ("status", "status"),
+    ("dataSources", "data_sources"),
+    ("verdict", "verdict"),
+    ("verdictReasoning", "verdict_reasoning"),
+    ("assignee", "assignee"),
+    ("assignees", "assignees"),
+    ("comments", "comments"),
+    ("incidentSummary", "description"),
+    ("incidentFindings", "incident_findings"),
+    ("assets", "assets"),
+    ("observables", "observables"),
+    ("alertsCount", "alerts_count"),
+    ("alerts", "alerts"),
+    ("recommendedActions", "recommended_actions"),
+    ("investigationPlan", "investigation_plan"),
+    ("labels", "labels"),
+    ("skills", "skills"),
+    ("href", "source_url"),
+    ("link", "source_url"),
+    ("timeline", "timeline"),
+)
+
+
 def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: int) -> dict:
+    """Map a Vega alert or incident onto a SOAR event using API fields only.
+
+    Empty or missing Vega values are omitted so the Default event section does
+    not show null fields that were never returned by getAlerts/getIncidents.
+    """
     identifier = record_id(record, entity_type)
     severity = record_severity(record)
     meta = soar_meta(record)
@@ -432,37 +523,25 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
         "device_vendor": VENDOR_NAME,
         "device_product": DEVICE_PRODUCT,
         "product": DEVICE_PRODUCT,
-        "source_grouping_identifier": grouping_id,
         "event_type": entity_type,
         "product_log_id": identifier,
         "vega_id": identifier,
         "event_class_id": identifier,
         "DeviceEventClassID": identifier,
         "Severity": severity,
-        "status": str(record.get("status") or ""),
-        "verdict": str(record.get("verdict") or ""),
-        "verdict_reasoning": str(record.get("verdictReasoning") or ""),
-        "description": str(record.get("description") or record.get("incidentSummary") or ""),
-        "source_url": str(record.get("href") or record.get("link") or ""),
-        "created_at": str(record.get("createdAt") or ""),
-        "updated_at": record_timestamp(record),
         "vega_entity_type": entity_type,
         "vega_soar_alert_type": soar_alert_type,
-        "vega_alert_id": str(record.get("vegaAlertId") or ""),
-        "vega_incident_id": incident_id,
-        "vega_unique_incident_id": incident_display_id,
-        "vega_comments": _safe_json(record.get("comments") or []),
-        "vega_recommended_actions": _safe_json(record.get("recommendedActions") or []),
-        "vega_investigation_plan": _safe_json(record.get("investigationPlan") or []),
-        "vega_labels": _safe_json(record.get("labels") or []),
-        "vega_skills": _safe_json(record.get("skills") or []),
-        "vega_timeline": _safe_json(record.get("timeline") or []),
-        "vega_alert_events_count": str(len(record.get("alert_events") or [])),
-        "vega_observables": _safe_json(record.get("observables") or []),
-        "vega_assets": _safe_json(record.get("assets") or []),
-        "vega_entities": _safe_json(record.get("entities") or []),
-        "details": _details_payload(record),
     }
+    _set_mapped(event, "source_grouping_identifier", grouping_id)
+    _set_mapped(event, "vega_incident_id", incident_id)
+    if entity_type == ENTITY_TYPE_INCIDENT:
+        _map_api_fields(event, record, _INCIDENT_API_FIELDS)
+    else:
+        _map_api_fields(event, record, _ALERT_API_FIELDS)
+    _set_mapped(event, "vega_unique_incident_id", incident_display_id)
+    details = _details_payload(record)
+    if details:
+        event["details"] = details
     event.update(_flatten_entities(record))
     return event
 
@@ -500,6 +579,28 @@ def normalize_alert_event(vega_event: Any) -> dict:
     return merged
 
 
+def _is_flat_dict(value: dict) -> bool:
+    return all(not isinstance(item, (dict, list)) for item in value.values())
+
+
+def _iter_dynamic_fields(payload: dict):
+    """Yield API keys/values from getAlertsEvents, flattening one-level dicts."""
+    for key, value in payload.items():
+        if str(key) in _SKIP_PAYLOAD_KEYS:
+            continue
+        if not _has_mapped_value(value):
+            continue
+        if isinstance(value, dict) and _is_flat_dict(value):
+            for nested_key, nested_value in value.items():
+                if str(nested_key) in _SKIP_PAYLOAD_KEYS:
+                    continue
+                if not _has_mapped_value(nested_value):
+                    continue
+                yield nested_key, nested_value
+            continue
+        yield key, value
+
+
 def build_vega_alert_event_dict(
     parent: dict,
     vega_event: Any,
@@ -511,6 +612,7 @@ def build_vega_alert_event_dict(
 
     Child events must use a unique product_log_id and only string field values.
     Shared IDs or nested/Splunk-style keys cause SecOps to drop them from the case.
+    Fields are taken from the API payload as-is; empty values are omitted.
     """
     identifier = record_id(parent, ENTITY_TYPE_ALERT)
     payload = normalize_alert_event(vega_event)
@@ -536,29 +638,31 @@ def build_vega_alert_event_dict(
         "device_vendor": VENDOR_NAME,
         "device_product": DEVICE_PRODUCT,
         "product": DEVICE_PRODUCT,
-        "source_grouping_identifier": grouping_id,
         "event_type": "Alert Event",
         "product_log_id": event_key,
         "vega_id": identifier,
-        "vega_alert_id": str(parent.get("vegaAlertId") or ""),
-        "vega_incident_id": incident_id,
         "event_class_id": event_key,
         "DeviceEventClassID": event_key,
         "Severity": record_severity(parent),
         "vega_entity_type": "Alert Event",
-        "details": _soar_value(payload, limit=_MAX_DETAILS_CHARS),
     }
+    _set_mapped(event, "source_grouping_identifier", grouping_id)
+    _set_mapped(event, "vega_alert_id", parent.get("vegaAlertId"))
+    _set_mapped(event, "vega_incident_id", incident_id)
     extra = 0
-    for key, value in payload.items():
-        if extra >= _MAX_EXTRA_FIELDS or value in (None, ""):
-            continue
-        if str(key) in _SKIP_PAYLOAD_KEYS:
-            continue
+    for key, value in _iter_dynamic_fields(payload):
+        if extra >= _MAX_EXTRA_FIELDS:
+            break
         safe_key = _soar_key(key)
         if not safe_key or safe_key in event:
             continue
         event[safe_key] = _soar_value(value)
         extra += 1
+    details_payload = {
+        key: value for key, value in payload.items() if _has_mapped_value(value)
+    }
+    if details_payload:
+        event["details"] = _soar_value(details_payload, limit=_MAX_DETAILS_CHARS)
     event.update(_flatten_entities(payload))
     _apply_entity_aliases(event, payload)
     return event
