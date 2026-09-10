@@ -1,9 +1,14 @@
 """Tests for Vega SOAR case/alert/event hierarchy mapping."""
 from __future__ import annotations
 
+import json
+
 from core.constants import (
     ENTITY_TYPE_ALERT,
     ENTITY_TYPE_INCIDENT,
+    GET_ALERTS_QUERY,
+    GET_ALERTS_QUERY_COMPAT,
+    GET_INCIDENTS_QUERY,
     SOAR_ALERT_TYPE_ALERT,
     SOAR_ALERT_TYPE_INCIDENT,
 )
@@ -13,15 +18,19 @@ from core.mapping import (
     build_vega_alert_event_dict,
     case_display_name,
     chunk_case_alerts,
+    collect_label_tags,
     incident_alert_ids,
     incident_case_title,
     incident_grouping_id,
+    merge_related_alert,
+    pending_case_tags,
     record_id,
     record_label_tags,
     related_incident_ref,
     set_soar_meta,
     soar_meta,
     stub_to_alert,
+    tags_from_events,
 )
 from core.Remediator import extract_sync_targets
 
@@ -36,7 +45,7 @@ def test_case_display_name_uses_entity_display_id_and_name() -> None:
     ).startswith("Vega Incident - VINC-1 - Campaign")
     incident = {"vegaUniqueIncidentId": "VINC-1", "name": "Campaign"}
     assert incident_case_title(incident).startswith("Vega Incident - VINC-1 - Campaign")
-    assert incident_case_title(incident, 2).endswith("(part 2)")
+    assert incident_case_title(incident, 2).endswith("(batch 2)")
     uuid = "019e1b27-5119-7822-bde3-344b13e481cf"
     assert case_display_name(
         {"id": uuid, "alertId": uuid, "vegaAlertId": "VALERT-9", "name": "Persist"},
@@ -63,10 +72,252 @@ def test_label_tags_are_unique_by_name() -> None:
                 {"name": "apt"},
                 "apt",
                 {"name": ""},
+                {"labelName": "c2"},
+                {"name": "x"},
             ]
         }
     )
-    assert tags == ["malware", "apt"]
+    assert tags == ["malware", "apt", "c2"]
+
+
+def test_collect_label_tags_unions_incident_and_alert_labels() -> None:
+    tags = collect_label_tags(
+        {"labels": [{"name": "malware"}, {"name": "campaign"}]},
+        {"labels": [{"name": "Phish"}, "malware"]},
+        {"labels": [{"name": "c2"}]},
+        {},
+    )
+    assert tags == ["malware", "campaign", "Phish", "c2"]
+
+
+def test_graphql_queries_request_label_name_and_color_only() -> None:
+    for query in (GET_ALERTS_QUERY, GET_ALERTS_QUERY_COMPAT, GET_INCIDENTS_QUERY):
+        assert "labels { name color }" in query
+        assert "labels { id" not in query
+        assert "categoryId" not in query
+        assert "usageCount" not in query
+    assert (
+        "alerts { alertId vegaAlertId name createdAt }"
+        in GET_INCIDENTS_QUERY
+    )
+    assert "alerts { alertId vegaAlertId name createdAt labels" not in GET_INCIDENTS_QUERY
+
+
+def test_stub_to_alert_keeps_nested_labels() -> None:
+    stub = stub_to_alert(
+        {
+            "alertId": "abc",
+            "name": "x",
+            "labels": [{"name": "incident-33 related alert", "color": "BLUE"}],
+        }
+    )
+    assert stub["id"] == "abc"
+    assert stub["labels"] == [{"name": "incident-33 related alert", "color": "BLUE"}]
+
+
+def test_merge_related_alert_uses_stub_labels_when_full_has_none() -> None:
+    stub = {
+        "alertId": "alert-1",
+        "vegaAlertId": "VEGA-2418",
+        "labels": [{"name": "incident-33 related alert"}],
+    }
+    full = {"id": "alert-1", "name": "Phish", "labels": []}
+    merged = merge_related_alert(stub, full)
+    assert merged["labels"] == [{"name": "incident-33 related alert"}]
+    assert merged["vegaAlertId"] == "VEGA-2418"
+    assert merge_related_alert(stub, None)["labels"] == [
+        {"name": "incident-33 related alert"}
+    ]
+
+
+def test_alert_event_maps_label_name_and_color_only() -> None:
+    event = build_event_dict(
+        {
+            "id": "alert-1",
+            "name": "Phish",
+            "labels": [
+                {
+                    "id": "lbl-1",
+                    "categoryId": "cat-1",
+                    "name": "phish",
+                    "color": "#ff0000",
+                    "usageCount": 9,
+                },
+                {"name": "malware"},
+            ],
+        },
+        ENTITY_TYPE_ALERT,
+        1,
+        1,
+    )
+    labels = json.loads(event["labels"])
+    assert labels == [{"name": "phish", "color": "#ff0000"}, {"name": "malware"}]
+    assert event["vega_label_names"] == "phish,malware"
+    details = json.loads(event["details"])
+    assert details["labels"] == labels
+    assert "categoryId" not in event["labels"]
+    assert "usageCount" not in event["labels"]
+    assert "categoryId" not in event["details"]
+    assert "usageCount" not in event["details"]
+
+
+def test_incident_event_maps_label_name_and_color_only() -> None:
+    event = build_event_dict(
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "labels": [
+                {
+                    "id": "lbl-2",
+                    "categoryId": "cat-2",
+                    "name": "campaign",
+                    "color": "#00aa00",
+                    "usageCount": 3,
+                }
+            ],
+        },
+        ENTITY_TYPE_INCIDENT,
+        1,
+        1,
+    )
+    labels = json.loads(event["labels"])
+    assert labels == [{"name": "campaign", "color": "#00aa00"}]
+    details = json.loads(event["details"])
+    assert details["labels"] == labels
+
+
+def test_alert_event_keeps_empty_labels_list() -> None:
+    event = build_event_dict(
+        {"id": "alert-1", "name": "Phish", "labels": []},
+        ENTITY_TYPE_ALERT,
+        1,
+        1,
+    )
+    assert json.loads(event["labels"]) == []
+    assert "vega_label_names" not in event
+    assert json.loads(event["details"])["labels"] == []
+
+
+def test_alert_event_keeps_labels_when_missing() -> None:
+    event = build_event_dict(
+        {"id": "alert-1", "name": "Phish"},
+        ENTITY_TYPE_ALERT,
+        1,
+        1,
+    )
+    assert json.loads(event["labels"]) == []
+    assert json.loads(event["details"])["labels"] == []
+
+
+def test_incident_event_keeps_empty_labels_list() -> None:
+    event = build_event_dict(
+        {"id": "inc-1", "name": "Campaign", "labels": []},
+        ENTITY_TYPE_INCIDENT,
+        1,
+        1,
+    )
+    assert json.loads(event["labels"]) == []
+    assert json.loads(event["details"])["labels"] == []
+
+
+def test_related_alert_event_does_not_copy_incident_labels() -> None:
+    event = build_event_dict(
+        set_soar_meta(
+            {"id": "alert-1", "vegaAlertId": "VALERT-1", "name": "Phish", "labels": []},
+            incident_id="inc-1",
+            incident_label_tags=["campaign", "IT"],
+            is_incident_case=True,
+        ),
+        ENTITY_TYPE_ALERT,
+        1,
+        1,
+    )
+    assert json.loads(event["labels"]) == []
+    assert "vega_label_names" not in event
+    assert event["vega_incident_label_names"] == "campaign,IT"
+
+
+def test_tags_from_events_reads_incident_label_names_on_overflow() -> None:
+    tags = tags_from_events(
+        [
+            {
+                "labels": "[]",
+                "vega_incident_label_names": "campaign,IT",
+            },
+            {
+                "labels": json.dumps([{"name": "beacon", "color": "BLUE"}]),
+            },
+        ]
+    )
+    assert tags == ["campaign", "IT", "beacon"]
+
+
+def test_tags_from_events_unions_incident_and_related_alert_labels() -> None:
+    tags = tags_from_events(
+        [
+            {
+                "labels": json.dumps(
+                    [
+                        {"name": "incident", "color": "BLUE"},
+                        {"name": "IT", "color": "BLUE"},
+                    ]
+                ),
+                "vega_label_names": "incident,IT",
+            },
+            {
+                "labels": json.dumps(
+                    [{"name": "incident-33 related alert", "color": "BLUE"}]
+                ),
+                "vega_label_names": "incident-33 related alert",
+            },
+            {"labels": "[]"},
+        ]
+    )
+    assert tags == ["incident", "IT", "incident-33 related alert"]
+
+
+def test_tags_from_events_reads_label_json_and_csv() -> None:
+    tags = tags_from_events(
+        [
+            {"labels": [{"name": "malware"}]},
+            {"vega_label_names": "phish, malware"},
+            {"vega_label_names": "c2"},
+        ]
+    )
+    assert tags == ["malware", "phish", "c2"]
+
+
+def test_tags_from_events_reads_nested_soar_event_shapes() -> None:
+    class SecurityEvent:
+        def __init__(self) -> None:
+            self.additional_properties = {
+                "details": json.dumps({"labels": [{"name": "campaign", "color": "#00aa00"}]})
+            }
+
+    tags = tags_from_events(
+        [
+            {
+                "additional_properties": {
+                    "labels": json.dumps([{"name": "phish", "color": "#ff0000"}])
+                }
+            },
+            SecurityEvent(),
+            {"vega_label_names": "noise"},
+        ]
+    )
+    assert tags == ["phish", "campaign", "noise"]
+
+
+def test_record_label_tags_parses_json_string() -> None:
+    tags = record_label_tags({"labels": json.dumps([{"name": "malware"}, {"name": "c2"}])})
+    assert tags == ["malware", "c2"]
+
+
+def test_pending_case_tags_skips_existing_and_duplicates() -> None:
+    assert pending_case_tags(
+        ["malware", "Malware", "phish", "c2", "x"],
+        existing=["PHISH"],
+    ) == ["malware", "c2"]
 
 
 def test_related_incident_ref() -> None:
@@ -78,7 +329,7 @@ def test_related_incident_ref() -> None:
 
 def test_grouping_ids() -> None:
     assert incident_grouping_id("inc-1") == "Vega:incident:inc-1"
-    assert incident_grouping_id("inc-1", 2) == "Vega:incident:inc-1:part:2"
+    assert incident_grouping_id("inc-1", 2) == "Vega:incident:inc-1:batch:2"
     assert alert_grouping_id("a-1") == "Vega:alert:a-1"
 
 
@@ -127,7 +378,6 @@ _EMPTY_API_KEYS = (
     "vega_incident_id",
     "vega_unique_incident_id",
     "comments",
-    "labels",
     "skills",
     "recommended_actions",
     "investigation_plan",
@@ -155,6 +405,7 @@ def test_alert_event_omits_missing_api_fields() -> None:
         1,
     )
     assert event["vega_alert_id"] == "VALERT-1"
+    assert json.loads(event["labels"]) == []
     for key in _EMPTY_API_KEYS:
         assert key not in event, key
 

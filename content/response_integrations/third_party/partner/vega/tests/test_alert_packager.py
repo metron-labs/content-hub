@@ -1,6 +1,7 @@
 """Tests for AlertInfo packaging fields used by SOAR search and grouping."""
 from __future__ import annotations
 
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -13,6 +14,7 @@ class FakeAlertInfo:
         self.events: list = []
         self.extensions: dict = {}
         self.case_tags = None
+        self.tags = None
         self.rule_generator = ""
         self.device_product = ""
         self.source_grouping_identifier = ""
@@ -48,6 +50,15 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
             "vegaUniqueIncidentId": "VINC-1",
             "name": "Campaign",
             "createdAt": "2026-07-28T11:22:43Z",
+            "labels": [
+                {
+                    "id": "lbl-1",
+                    "categoryId": "cat-1",
+                    "name": "campaign",
+                    "color": "#00aa00",
+                    "usageCount": 2,
+                }
+            ],
         },
         grouping_id="Vega:incident:inc-1",
         case_tags=["malware"],
@@ -62,6 +73,7 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
             "vegaAlertId": "VALERT-1",
             "name": "Phish",
             "createdAt": "2026-04-05T01:18:35Z",
+            "labels": [{"name": "phish", "color": "#ff0000"}],
             "alert_events": [{"name": "login"}],
         },
         grouping_id="Vega:incident:inc-1",
@@ -71,7 +83,12 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
         is_incident_case=True,
     )
     unrelated = set_soar_meta(
-        {"id": "alert-3", "vegaAlertId": "VALERT-3", "name": "Noise"},
+        {
+            "id": "alert-3",
+            "vegaAlertId": "VALERT-3",
+            "name": "Noise",
+            "labels": [{"name": "noise", "color": "#888888"}],
+        },
         grouping_id="Vega:alert:alert-3",
         case_tags=[],
         is_incident_case=False,
@@ -107,15 +124,115 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
     assert related_alert.source_grouping_identifier == "Vega:incident:inc-1"
     assert standalone.source_grouping_identifier == "Vega:alert:alert-3"
     assert incident_alert.start_time == related_alert.start_time
-    assert incident_alert.case_tags == ["malware"]
+    assert incident_alert.case_tags is None
+    assert incident_alert.tags is None
+    assert "tags" not in incident_alert.extensions
+    assert "tags" not in incident_alert.events[0]
+    assert getattr(related_alert, "tags", None) in (None, [], "")
     assert standalone.case_tags is None
+    assert standalone.tags is None
     assert len(incident_alert.events) == 1
     assert incident_alert.events[0]["name"].startswith("Vega Incident - VINC-1 - Campaign")
     assert len(related_alert.events) == 2
     assert related_alert.events[0]["name"].startswith("Vega Alert - VALERT-1 - Phish")
     assert related_alert.events[1]["name"] == "login"
     assert related_alert.events[0]["source_grouping_identifier"] == "Vega:incident:inc-1"
+    assert json.loads(incident_alert.events[0]["labels"]) == [
+        {"name": "campaign", "color": "#00aa00"}
+    ]
+    assert "categoryId" not in incident_alert.events[0]["labels"]
+    assert json.loads(related_alert.events[0]["labels"]) == [
+        {"name": "phish", "color": "#ff0000"}
+    ]
+    assert related_alert.events[0]["vega_label_names"] == "phish"
+    assert json.loads(standalone.events[0]["labels"]) == [
+        {"name": "noise", "color": "#888888"}
+    ]
     assert len(standalone.events) == 1
+
+
+def test_packager_keeps_empty_labels_and_incident_tag_names() -> None:
+    case_title = "Vega Incident - VINC-1 - Campaign"
+    incident = set_soar_meta(
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "VINC-1",
+            "name": "Campaign",
+            "labels": [],
+        },
+        grouping_id="Vega:incident:inc-1",
+        case_tags=["campaign"],
+        case_title=case_title,
+        incident_id="inc-1",
+        is_incident_case=True,
+    )
+    related_empty = set_soar_meta(
+        {
+            "id": "alert-1",
+            "vegaAlertId": "VALERT-1",
+            "name": "Phish",
+            "labels": [],
+        },
+        grouping_id="Vega:incident:inc-1",
+        case_title=case_title,
+        incident_id="inc-1",
+        incident_label_tags=["campaign"],
+        is_incident_case=True,
+    )
+    overflow = set_soar_meta(
+        {
+            "id": "alert-4",
+            "vegaAlertId": "VALERT-4",
+            "name": "Beacon",
+            "labels": [{"name": "beacon"}],
+        },
+        grouping_id="Vega:incident:inc-1:batch:2",
+        case_tags=["campaign", "beacon"],
+        case_title=f"{case_title} (batch 2)",
+        incident_id="inc-1",
+        incident_label_tags=["campaign"],
+        is_incident_case=True,
+        apply_case_tags=True,
+        case_part=2,
+    )
+    unrelated_empty = set_soar_meta(
+        {
+            "id": "alert-3",
+            "vegaAlertId": "VALERT-3",
+            "name": "Noise",
+        },
+        grouping_id="Vega:alert:alert-3",
+        case_tags=[],
+        is_incident_case=False,
+    )
+    siemplify = SimpleNamespace(
+        context=SimpleNamespace(connector_info=SimpleNamespace(environment="Default"))
+    )
+    _install_fake_sdk()
+    from core.AlertPackager import create_alerts
+
+    packages = create_alerts(
+        [
+            (ENTITY_TYPE_INCIDENT, incident),
+            (ENTITY_TYPE_ALERT, related_empty),
+            (ENTITY_TYPE_ALERT, overflow),
+            (ENTITY_TYPE_ALERT, unrelated_empty),
+        ],
+        siemplify,
+    )
+    incident_alert, related_alert, overflow_alert, standalone = packages
+    assert json.loads(incident_alert.events[0]["labels"]) == []
+    assert json.loads(related_alert.events[0]["labels"]) == []
+    assert related_alert.events[0]["vega_incident_label_names"] == "campaign"
+    assert "vega_label_names" not in related_alert.events[0]
+    assert getattr(related_alert, "tags", None) in (None, [], "")
+    assert overflow_alert.case_tags is None
+    assert overflow_alert.tags is None
+    assert json.loads(overflow_alert.events[0]["labels"]) == [{"name": "beacon"}]
+    assert overflow_alert.events[0]["vega_incident_label_names"] == "campaign"
+    assert json.loads(standalone.events[0]["labels"]) == []
+    assert "vega_incident_label_names" not in standalone.events[0]
+    assert standalone.case_tags is None
 
 
 def test_child_event_zero_timestamp_falls_back_to_parent() -> None:

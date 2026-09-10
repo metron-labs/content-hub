@@ -19,6 +19,7 @@ SET_DETECTIONS_STATE_SCRIPT_NAME = f"{INTEGRATION_NAME} - Set Detections State"
 UPDATE_DETECTIONS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Update Detections"
 UPDATE_ALERT_SCRIPT_NAME = f"{INTEGRATION_NAME} - Update Alert"
 UPDATE_INCIDENT_SCRIPT_NAME = f"{INTEGRATION_NAME} - Update Incident"
+APPLY_VEGA_LABELS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Apply Vega Labels as Tags"
 
 CONNECTOR_NAME = "Vega Alerts and Incidents Connector"
 CHECKPOINT_PROPERTY_KEY = "vega_ingestion_checkpoint"
@@ -184,6 +185,7 @@ query GetAlerts(
       verdictReasoning
       dedupCount
       comments { text addedBy addedAt }
+      labels { name color }
       href
     }
     total
@@ -267,7 +269,7 @@ query GetAlerts(
       }
       dedupCount
       comments { text addedBy addedAt }
-      labels { id categoryId name color usageCount }
+      labels { name color }
       skills { id name version }
       actors { field values }
       targets { field values }
@@ -281,8 +283,10 @@ query GetAlerts(
 }
 """.strip()
 
-# Incident list used by the Yes path. `alerts { alertId ... }` is the source of
-# related alert IDs passed into GET_ALERTS_QUERY.
+# Incident list used by the Yes path. Nested `alerts` is a stub type
+# (alertId, vegaAlertId, name, createdAt only). Do not add `labels` there:
+# Vega rejects the field and getIncidents returns no incidents at all.
+# Related-alert labels come from getAlerts, not this nested selection.
 GET_INCIDENTS_QUERY = """
 query GetIncidents(
   $incidentNames: [String!],
@@ -347,7 +351,7 @@ query GetIncidents(
         stepConclusion
         cells { cellName query queryId }
       }
-      labels { id categoryId name color usageCount }
+      labels { name color }
       skills { id name version }
       link
       href

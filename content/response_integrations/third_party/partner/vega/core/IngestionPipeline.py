@@ -45,11 +45,13 @@ from .mapping import (
     alert_grouping_id,
     case_display_name,
     chunk_case_alerts,
+    collect_label_tags,
     incident_alert_ids,
     incident_alert_stubs,
     incident_case_title,
     incident_grouping_id,
     index_alert_records,
+    merge_related_alert,
     record_alert_ids,
     record_display_id,
     record_id,
@@ -58,7 +60,6 @@ from .mapping import (
     record_timestamp,
     related_incident_ref,
     set_soar_meta,
-    stub_to_alert,
 )
 from .utils import (
     compute_time_window,
@@ -135,12 +136,16 @@ class IngestionPipeline:
         vega_alert_ids: Optional[list[str]] = None,
         include_time: bool = True,
     ) -> dict:
-        filters = self.alert_filters
-        payload = {
-            "alertSeverities": filters["severities"],
-            "statuses": filters["statuses"],
-            "alertVerdicts": filters["verdicts"],
-        }
+        payload: dict = {}
+        if not (alert_ids or vega_alert_ids):
+            filters = self.alert_filters
+            payload = {
+                "alertSeverities": filters["severities"],
+                "statuses": filters["statuses"],
+                "alertVerdicts": filters["verdicts"],
+            }
+        # ID lookups skip connector alert filters so nested related alerts
+        # keep their Vega labels instead of being replaced by stubs.
         if alert_ids:
             payload["alertIds"] = alert_ids
         if vega_alert_ids:
@@ -383,7 +388,7 @@ class IngestionPipeline:
                 full = related_index.get(key)
                 if full:
                     break
-            _add(full if isinstance(full, dict) else stub_to_alert(stub))
+            _add(merge_related_alert(stub, full))
 
         for alert in related_index.values():
             ref_id, _ = related_incident_ref(alert)
@@ -391,12 +396,20 @@ class IngestionPipeline:
                 _add(alert)
         return resolved
 
-    def _apply_incident_context(self, alert: dict, incident: dict, case_part: int = 1) -> dict:
+    def _apply_incident_context(
+        self,
+        alert: dict,
+        incident: dict,
+        case_part: int = 1,
+        case_tags: Optional[list[str]] = None,
+    ) -> dict:
         incident_id = record_id(incident, ENTITY_TYPE_INCIDENT)
         display_id = record_display_id(incident, ENTITY_TYPE_INCIDENT)
         alert = dict(alert)
-        if incident.get("labels") and not alert.get("labels"):
-            alert["labels"] = incident.get("labels")
+        # Related alerts keep their own Vega labels. Empty stays empty on the
+        # event (`[]`); never copy incident labels onto a related alert's
+        # `labels` field. Incident names still go on case_tags (every batch)
+        # and incident_label_tags so overflow cases can tag from events.
         if incident.get("timeline") and not alert.get("timeline"):
             alert["timeline"] = incident.get("timeline")
         description = str(alert.get("description") or "").strip()
@@ -412,7 +425,8 @@ class IngestionPipeline:
             alert,
             soar_alert_type=SOAR_ALERT_TYPE_ALERT,
             grouping_id=incident_grouping_id(incident_id, case_part),
-            case_tags=record_label_tags(incident),
+            case_tags=list(case_tags or []),
+            incident_label_tags=record_label_tags(incident),
             case_title=incident_case_title(incident, case_part),
             grouping_time=record_timestamp(incident),
             incident_id=incident_id,
@@ -429,6 +443,7 @@ class IngestionPipeline:
         ingested: list[str],
         ingested_set: set[str],
         case_part: int = 1,
+        case_tags: Optional[list[str]] = None,
     ) -> bool:
         if self._remaining(len(records)) == 0:
             return False
@@ -443,7 +458,7 @@ class IngestionPipeline:
             incident,
             soar_alert_type=SOAR_ALERT_TYPE_INCIDENT,
             grouping_id=incident_grouping_id(identifier, case_part),
-            case_tags=record_label_tags(incident),
+            case_tags=list(case_tags or []),
             case_title=incident_case_title(incident, case_part),
             grouping_time=record_timestamp(incident),
             incident_id=identifier,
@@ -465,6 +480,8 @@ class IngestionPipeline:
         ingested: list[str],
         ingested_set: set[str],
         case_part: int = 1,
+        case_tags: Optional[list[str]] = None,
+        apply_case_tags: bool = False,
     ) -> bool:
         if self._remaining(len(records)) == 0:
             return False
@@ -482,7 +499,11 @@ class IngestionPipeline:
             )
             enriched = dict(alert)
             enriched.setdefault("alert_events", [])
-        packaged = self._apply_incident_context(enriched, incident, case_part)
+        packaged = self._apply_incident_context(
+            enriched, incident, case_part, case_tags=case_tags
+        )
+        if apply_case_tags:
+            packaged = set_soar_meta(packaged, apply_case_tags=True)
         records.append((ENTITY_TYPE_ALERT, packaged))
         self._mark_ingested(ingested, ingested_set, identifier)
         return True
@@ -517,13 +538,29 @@ class IngestionPipeline:
         for index, chunk in enumerate(chunks, start=1):
             if self._remaining(len(records)) == 0:
                 break
+            # Incident labels → every batch case. Related-alert labels in this
+            # chunk → this case only (unique labels stay on the case that has
+            # those alerts).
+            case_tags = collect_label_tags(incident, *chunk)
             if index == 1:
                 self._append_incident_alert(
-                    incident, records, ingested, ingested_set, case_part=index
+                    incident,
+                    records,
+                    ingested,
+                    ingested_set,
+                    case_part=index,
+                    case_tags=case_tags,
                 )
-            for alert in chunk:
+            for offset, alert in enumerate(chunk):
                 if not self._append_related_alert(
-                    alert, incident, records, ingested, ingested_set, case_part=index
+                    alert,
+                    incident,
+                    records,
+                    ingested,
+                    ingested_set,
+                    case_part=index,
+                    case_tags=case_tags,
+                    apply_case_tags=index > 1 and offset == 0,
                 ):
                     if self._remaining(len(records)) == 0:
                         return
@@ -592,7 +629,7 @@ class IngestionPipeline:
             self._enrich_alert(alert),
             soar_alert_type=SOAR_ALERT_TYPE_ALERT,
             grouping_id=alert_grouping_id(identifier),
-            case_tags=[],
+            case_tags=collect_label_tags(alert),
             case_title=case_display_name(alert, ENTITY_TYPE_ALERT),
             incident_id="",
             is_incident_case=False,

@@ -47,7 +47,7 @@ parameters:
     is_advanced: false
     mode: script
 -   name: Max Days Backwards
-    default_value: '130'
+    default_value: '135'
     type: string
     description: Days to backfill on the first run only. Enter an integer from 0 to
         365 (0 starts from today). Invalid values cause a configuration error.

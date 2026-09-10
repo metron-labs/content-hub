@@ -141,6 +141,14 @@ def test_incident_related_alerts_share_incident_grouping() -> None:
     titles = {soar_meta(item[1])["case_title"] for item in related}
     assert all(title.startswith("Vega Incident - VINC-1 - Campaign") for title in titles)
     assert soar_meta(related[0][1])["case_tags"] == ["malware"]
+    assert all(soar_meta(item[1])["case_tags"] == ["malware"] for item in related)
+    assert all(
+        soar_meta(item[1])["incident_label_tags"] == ["malware"]
+        for item in related
+        if item[0] == ENTITY_TYPE_ALERT
+    )
+    assert soar_meta(unrelated[0][1])["case_tags"] == []
+    assert "incident_label_tags" not in soar_meta(unrelated[0][1])
     assert [item[1]["id"] for item in related[1:]] == ["alert-1", "alert-2"]
     assert related[1][1]["vegaAlertId"] == "VALERT-1"
     assert related[2][1]["vegaAlertId"] == "VALERT-2"
@@ -160,6 +168,117 @@ def test_incident_related_alerts_share_incident_grouping() -> None:
         call for call in manager.alert_calls if call.get("hasRelatedIncidents") is False
     ]
     assert unrelated_lookups
+
+
+def test_incident_related_and_unrelated_keep_own_labels() -> None:
+    manager = _sample_manager()
+    manager.incidents[0]["labels"] = [{"name": "campaign", "color": "#00aa00"}]
+    manager.alerts[0]["labels"] = [{"name": "phish", "color": "#ff0000"}]
+    manager.alerts[1]["labels"] = [{"name": "c2", "color": "#0000ff"}]
+    manager.alerts[2]["labels"] = [{"name": "noise", "color": "#888888"}]
+    summary = _pipeline(manager).run()
+    by_id = {item[1]["id"]: item[1] for item in summary["records"]}
+    assert by_id["inc-1"]["labels"] == [{"name": "campaign", "color": "#00aa00"}]
+    assert by_id["alert-1"]["labels"] == [{"name": "phish", "color": "#ff0000"}]
+    assert by_id["alert-2"]["labels"] == [{"name": "c2", "color": "#0000ff"}]
+    assert by_id["alert-3"]["labels"] == [{"name": "noise", "color": "#888888"}]
+
+
+def test_related_stub_does_not_inherit_incident_labels() -> None:
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "VINC-1",
+            "name": "Campaign",
+            "labels": [{"name": "campaign", "color": "#00aa00"}],
+            "alerts": [{"alertId": "alert-missing", "name": "Stub"}],
+        }
+    ]
+    manager.alerts = []
+    summary = _pipeline(manager, entities="Alerts,Incidents", has_related="Yes").run()
+    related = [item[1] for item in summary["records"] if item[0] == ENTITY_TYPE_ALERT]
+    assert related
+    assert not related[0].get("labels")
+    assert soar_meta(related[0])["case_tags"] == ["campaign"]
+
+
+def test_related_stub_keeps_nested_incident_alert_labels() -> None:
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "VINC-1",
+            "name": "Campaign",
+            "labels": [{"name": "campaign", "color": "#00aa00"}],
+            "alerts": [
+                {
+                    "alertId": "alert-missing",
+                    "vegaAlertId": "VEGA-2418",
+                    "name": "Stub",
+                    "labels": [{"name": "incident-33 related alert", "color": "BLUE"}],
+                }
+            ],
+        }
+    ]
+    manager.alerts = []
+    summary = _pipeline(manager, entities="Alerts,Incidents", has_related="Yes").run()
+    related = [item[1] for item in summary["records"] if item[0] == ENTITY_TYPE_ALERT]
+    assert related
+    assert related[0]["labels"] == [
+        {"name": "incident-33 related alert", "color": "BLUE"}
+    ]
+    assert related[0]["vegaAlertId"] == "VEGA-2418"
+    assert soar_meta(related[0])["case_tags"] == [
+        "campaign",
+        "incident-33 related alert",
+    ]
+
+
+def test_related_alert_keeps_own_labels_and_unions_tags() -> None:
+    manager = _sample_manager()
+    manager.incidents[0]["labels"] = [
+        {"name": "incident", "color": "BLUE"},
+        {"name": "IT", "color": "BLUE"},
+    ]
+    manager.alerts[0]["labels"] = [
+        {"name": "incident-33 related alert", "color": "BLUE"}
+    ]
+    manager.alerts[1]["labels"] = []
+    summary = _pipeline(manager).run()
+    by_id = {item[1]["id"]: item[1] for item in summary["records"]}
+    assert by_id["inc-1"]["labels"] == [
+        {"name": "incident", "color": "BLUE"},
+        {"name": "IT", "color": "BLUE"},
+    ]
+    assert by_id["alert-1"]["labels"] == [
+        {"name": "incident-33 related alert", "color": "BLUE"}
+    ]
+    assert not by_id["alert-2"].get("labels")
+    related = [item for item in summary["records"] if soar_meta(item[1]).get("is_incident_case")]
+    assert soar_meta(related[0][1])["case_tags"] == [
+        "incident",
+        "IT",
+        "incident-33 related alert",
+    ]
+    assert soar_meta(by_id["alert-1"])["incident_label_tags"] == ["incident", "IT"]
+    assert soar_meta(by_id["alert-2"])["incident_label_tags"] == ["incident", "IT"]
+    assert "incident_label_tags" not in soar_meta(by_id["alert-3"])
+
+
+def test_incident_case_unions_incident_and_related_alert_labels() -> None:
+    manager = _sample_manager()
+    manager.incidents[0]["labels"] = [{"name": "malware"}, {"name": "campaign"}]
+    manager.alerts[0]["labels"] = [{"name": "phish"}, {"name": "malware"}]
+    manager.alerts[1]["labels"] = [{"name": "c2"}]
+    manager.alerts[2]["labels"] = [{"name": "noise"}]
+    summary = _pipeline(manager).run()
+    related = [item for item in summary["records"] if soar_meta(item[1]).get("is_incident_case")]
+    unrelated = [item for item in summary["records"] if not soar_meta(item[1]).get("is_incident_case")]
+    expected = ["malware", "campaign", "phish", "c2"]
+    assert all(soar_meta(item[1])["case_tags"] == expected for item in related)
+    assert soar_meta(unrelated[0][1])["case_tags"] == ["noise"]
+    assert unrelated[0][1]["labels"] == [{"name": "noise"}]
 
 
 def test_incidents_alerts_yes_nests_related_and_skips_unrelated() -> None:
@@ -272,15 +391,15 @@ def test_incident_overflow_creates_duplicate_cases() -> None:
     parts = [soar_meta(record).get("case_part") for _, record in records]
     titles = [soar_meta(record)["case_title"] for _, record in records]
     assert all(title.startswith("Vega Incident - VINC-1 - Campaign") for title in titles)
-    assert titles[0].find("(part") == -1
-    assert titles[3].endswith("(part 2)")
+    assert titles[0].find("(batch") == -1
+    assert titles[3].endswith("(batch 2)")
     assert groupings == [
         "Vega:incident:inc-1",
         "Vega:incident:inc-1",
         "Vega:incident:inc-1",
-        "Vega:incident:inc-1:part:2",
-        "Vega:incident:inc-1:part:2",
-        "Vega:incident:inc-1:part:2",
+        "Vega:incident:inc-1:batch:2",
+        "Vega:incident:inc-1:batch:2",
+        "Vega:incident:inc-1:batch:2",
     ]
     assert parts == [1, 1, 1, 2, 2, 2]
     assert [record.get("id") for kind, record in records if kind == ENTITY_TYPE_INCIDENT] == [
@@ -293,6 +412,54 @@ def test_incident_overflow_creates_duplicate_cases() -> None:
         "alert-4",
         "alert-5",
     ]
+
+
+def test_overflow_case_unions_incident_and_chunk_alert_labels() -> None:
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "VINC-1",
+            "name": "Campaign",
+            "labels": [{"name": "campaign"}],
+            "alerts": [{"alertId": f"alert-{index}"} for index in range(1, 6)],
+        }
+    ]
+    manager.alerts = [
+        {"id": "alert-1", "name": "A1", "labels": [{"name": "phish"}]},
+        {"id": "alert-2", "name": "A2", "labels": [{"name": "c2"}]},
+        {"id": "alert-3", "name": "A3", "labels": [{"name": "beacon"}]},
+        {"id": "alert-4", "name": "A4"},
+        {"id": "alert-5", "name": "A5", "labels": [{"name": "persist"}]},
+    ]
+    summary = _pipeline(
+        manager,
+        entities="Alerts,Incidents",
+        has_related="Yes",
+        max_fetch=20,
+        max_alerts_per_case=3,
+    ).run()
+    part1 = [
+        soar_meta(record)["case_tags"]
+        for _, record in summary["records"]
+        if soar_meta(record).get("case_part") == 1
+    ]
+    part2 = [
+        soar_meta(record)["case_tags"]
+        for _, record in summary["records"]
+        if soar_meta(record).get("case_part") == 2
+    ]
+    assert part1 == [["campaign", "phish", "c2"]] * 3
+    assert part2 == [["campaign", "beacon", "persist"]] * 3
+    related = [
+        record
+        for kind, record in summary["records"]
+        if kind == ENTITY_TYPE_ALERT
+    ]
+    assert all(soar_meta(record)["incident_label_tags"] == ["campaign"] for record in related)
+    assert not related[3].get("labels")
+    assert related[0]["labels"] == [{"name": "phish"}]
+    assert related[4]["labels"] == [{"name": "persist"}]
 
 
 def test_two_incidents_one_related_and_overflow() -> None:

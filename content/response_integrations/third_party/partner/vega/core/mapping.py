@@ -154,15 +154,15 @@ def case_display_name(record: dict, entity_type: str) -> str:
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} TEST 32"
-    return f"Vega {entity_type} - {name} TEST 32"
+        return f"Vega {entity_type} - {display_id} - {name} TEST 56"
+    return f"Vega {entity_type} - {name} TEST 56"
 
 
 def incident_case_title(record: dict, case_part: int = 1) -> str:
     """Shared SOAR case title for an incident and its nested related alerts."""
     title = case_display_name(record, ENTITY_TYPE_INCIDENT)
     if case_part and case_part > 1:
-        return f"{title} (part {case_part})"
+        return f"{title} (batch {case_part})"
     return title
 
 
@@ -170,7 +170,7 @@ def incident_grouping_id(incident_id: str, case_part: int = 1) -> str:
     """SOAR source grouping key. Overflow cases use :part:N so they stay separate."""
     base = f"{VENDOR_NAME}:incident:{incident_id}"
     if case_part and case_part > 1:
-        return f"{base}:part:{case_part}"
+        return f"{base}:batch:{case_part}"
     return base
 
 
@@ -178,22 +178,76 @@ def alert_grouping_id(alert_id: str) -> str:
     return f"{VENDOR_NAME}:alert:{alert_id}"
 
 
+def _label_items(value: Any) -> list:
+    labels = value
+    if isinstance(labels, str) and labels.strip():
+        parsed = _try_parse_json(labels)
+        labels = parsed if parsed is not labels else [labels]
+    if isinstance(labels, dict):
+        labels = (
+            labels.get("items")
+            or labels.get("nodes")
+            or labels.get("labels")
+            or list(labels.values())
+        )
+    if not isinstance(labels, list):
+        return []
+    return labels
+
+
+def _display_labels(value: Any) -> list[dict]:
+    """Keep only Vega label name and color on SOAR events."""
+    displayed: list[dict] = []
+    for item in _label_items(value):
+        if isinstance(item, str):
+            name = item.strip()
+            if name:
+                displayed.append({"name": name})
+            continue
+        if not isinstance(item, dict):
+            continue
+        name = str(
+            item.get("name")
+            or item.get("label")
+            or item.get("labelName")
+            or item.get("displayName")
+            or ""
+        ).strip()
+        color = str(item.get("color") or "").strip()
+        if not name and not color:
+            continue
+        entry: dict[str, str] = {}
+        if name:
+            entry["name"] = name
+        if color:
+            entry["color"] = color
+        displayed.append(entry)
+    return displayed
+
+
 def record_label_tags(record: dict) -> list[str]:
-    """SOAR case tags from Vega incident labels. Reuses existing tag names."""
+    """SOAR case tags from Vega incident or alert `labels` names.
+
+    SecOps creates a tag on first use when AlertInfo.case_tags is set, so
+    names do not need to exist in Settings first. Names shorter than 2
+    characters are skipped (SOAR rejects them).
+    """
     tags: list[str] = []
     seen: set[str] = set()
     labels = record.get("labels") if isinstance(record, dict) else None
-    if isinstance(labels, str) and labels.strip():
-        labels = [labels]
-    if not isinstance(labels, list):
-        return tags
-    for item in labels:
+    for item in _label_items(labels):
         name = ""
         if isinstance(item, str):
             name = item.strip()
         elif isinstance(item, dict):
-            name = str(item.get("name") or item.get("label") or "").strip()
-        if not name:
+            name = str(
+                item.get("name")
+                or item.get("label")
+                or item.get("labelName")
+                or item.get("displayName")
+                or ""
+            ).strip()
+        if len(name) < 2:
             continue
         key = name.casefold()
         if key in seen:
@@ -201,6 +255,114 @@ def record_label_tags(record: dict) -> list[str]:
         seen.add(key)
         tags.append(name)
     return tags
+
+
+def collect_label_tags(*records: dict) -> list[str]:
+    """Unique case tags from an incident and every related alert in the case."""
+    tags: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        for name in record_label_tags(record or {}):
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            tags.append(name)
+    return tags
+
+
+_LABEL_TAG_KEYS = (
+    "labels",
+    "vega_label_names",
+    "vega_labels",
+    "vega_incident_label_names",
+)
+
+
+def flatten_event_for_tags(event: Any) -> dict:
+    """SOAR events store Vega fields on the object, in additional_properties, or in details JSON."""
+    payload: dict = {}
+    if isinstance(event, dict):
+        payload.update(event)
+    elif event is not None:
+        extra = getattr(event, "additional_properties", None)
+        if isinstance(extra, dict):
+            payload.update(extra)
+        raw = getattr(event, "__dict__", None)
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                if str(key).startswith("_"):
+                    continue
+                payload.setdefault(key, value)
+        fields = getattr(event, "fields", None)
+        if isinstance(fields, list):
+            payload.setdefault("fields", fields)
+    nested = payload.get("additional_properties") or payload.get("AdditionalProperties")
+    merged: dict = {}
+    if isinstance(nested, dict):
+        merged.update(nested)
+    for key, value in payload.items():
+        if key in ("additional_properties", "AdditionalProperties"):
+            continue
+        merged[key] = value
+    fields = merged.get("fields")
+    if isinstance(fields, list):
+        for item in fields:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key") or item.get("name") or item.get("field")
+            if key and "value" in item:
+                merged.setdefault(str(key), item.get("value"))
+    details = _try_parse_json(merged.get("details"))
+    if isinstance(details, dict):
+        for key in _LABEL_TAG_KEYS:
+            if key in details and merged.get(key) in (None, "", [], {}):
+                merged[key] = details.get(key)
+    return merged
+
+
+def tags_from_event_fields(event: Any) -> list[str]:
+    """Vega label names stored on a SOAR event (JSON labels or comma-separated names)."""
+    event = flatten_event_for_tags(event)
+    blobs: list = []
+    for key in _LABEL_TAG_KEYS:
+        value = event.get(key)
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, str):
+            parsed = _try_parse_json(value)
+            blobs.append(
+                parsed
+                if parsed is not value
+                else [part.strip() for part in value.split(",") if part.strip()]
+            )
+        else:
+            blobs.append(value)
+    return collect_label_tags(*[{"labels": blob} for blob in blobs])
+
+
+def pending_case_tags(names: list[str], existing: list[str] | set[str] | None = None) -> list[str]:
+    """Drop blank, short, and already-assigned tag names (case-insensitive)."""
+    seen = {
+        str(name).strip().casefold()
+        for name in (existing or [])
+        if str(name).strip()
+    }
+    pending: list[str] = []
+    for name in names or []:
+        text = str(name).strip()
+        key = text.casefold()
+        if len(text) < 2 or key in seen:
+            continue
+        seen.add(key)
+        pending.append(text)
+    return pending
+
+
+def tags_from_events(events: list) -> list[str]:
+    return collect_label_tags(
+        *[{"labels": tags_from_event_fields(event)} for event in (events or [])]
+    )
 
 
 def incident_alert_stubs(incident: dict) -> list[dict]:
@@ -251,6 +413,7 @@ def chunk_case_alerts(related_alerts: list, max_alerts_per_case: int) -> list[li
 
 
 def stub_to_alert(stub: dict) -> dict:
+    stub = stub if isinstance(stub, dict) else {}
     alert_id = str(
         stub.get("alertId") or stub.get("id") or stub.get("vegaAlertId") or ""
     ).strip()
@@ -264,7 +427,27 @@ def stub_to_alert(stub: dict) -> dict:
         "severity": stub.get("severity") or "MEDIUM",
         "status": stub.get("status") or "",
         "description": stub.get("description") or "",
+        "labels": stub.get("labels") if stub.get("labels") not in (None,) else [],
     }
+
+
+def merge_related_alert(stub: dict, full: dict | None) -> dict:
+    """Prefer the full getAlerts record; keep nested incident stub labels if needed.
+
+    getIncidents `alerts { ... }` is often what we package when getAlerts(id)
+    misses a related alert. Those stubs used to drop labels, so SecOps showed [].
+    """
+    stub = stub if isinstance(stub, dict) else {}
+    if not isinstance(full, dict):
+        return stub_to_alert(stub)
+    merged = dict(full)
+    if not record_label_tags(merged) and stub.get("labels") not in (None, "", [], {}):
+        merged["labels"] = stub.get("labels")
+    if not str(merged.get("vegaAlertId") or "").strip():
+        vega_id = str(stub.get("vegaAlertId") or "").strip()
+        if vega_id:
+            merged["vegaAlertId"] = vega_id
+    return merged
 
 
 def related_incident_ref(alert: dict) -> tuple[str, str]:
@@ -398,7 +581,10 @@ def _map_api_fields(event: dict, record: dict, fields: tuple[tuple[str, str], ..
     for api_key, event_key in fields:
         if api_key not in record:
             continue
-        _set_mapped(event, event_key, record.get(api_key))
+        value = record.get(api_key)
+        if api_key == "labels":
+            value = _display_labels(value)
+        _set_mapped(event, event_key, value)
 
 
 def _apply_entity_aliases(event: dict, payload: dict) -> None:
@@ -415,14 +601,18 @@ def _details_payload(record: dict) -> str:
     """JSON snapshot of the Vega record without duplicating child events."""
     if not isinstance(record, dict):
         return _safe_json(record)
-    trimmed = {
-        key: value
-        for key, value in record.items()
-        if key not in (SOAR_META_KEY, "alert_events", "nested_related_alerts")
-        and _has_mapped_value(value)
-    }
-    if not trimmed:
-        return ""
+    trimmed = {}
+    for key, value in record.items():
+        if key in (SOAR_META_KEY, "alert_events", "nested_related_alerts"):
+            continue
+        if key == "labels":
+            trimmed[key] = _display_labels(value)
+            continue
+        if not _has_mapped_value(value):
+            continue
+        trimmed[key] = value
+    if "labels" not in trimmed:
+        trimmed["labels"] = []
     return _soar_value(trimmed, limit=_MAX_DETAILS_CHARS)
 
 
@@ -491,6 +681,7 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
 
     Empty or missing Vega values are omitted so the Default event section does
     not show null fields that were never returned by getAlerts/getIncidents.
+    `labels` is always present: Vega names/colors, or `[]` when there are none.
     """
     identifier = record_id(record, entity_type)
     severity = record_severity(record)
@@ -539,6 +730,22 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
     else:
         _map_api_fields(event, record, _ALERT_API_FIELDS)
     _set_mapped(event, "vega_unique_incident_id", incident_display_id)
+    # Always keep `labels` in the Default event section, including `[]` when
+    # Vega returned none. Do not copy incident labels onto related/unrelated
+    # alert events; those stay on this record only.
+    event["labels"] = _soar_value(
+        _display_labels(record.get("labels") if isinstance(record, dict) else None)
+    )
+    label_names = record_label_tags(record)
+    if label_names:
+        event["vega_label_names"] = ",".join(label_names)
+    incident_label_names = [
+        str(name).strip()
+        for name in (meta.get("incident_label_tags") or [])
+        if str(name).strip()
+    ]
+    if incident_label_names and entity_type == ENTITY_TYPE_ALERT:
+        event["vega_incident_label_names"] = ",".join(incident_label_names)
     details = _details_payload(record)
     if details:
         event["details"] = details

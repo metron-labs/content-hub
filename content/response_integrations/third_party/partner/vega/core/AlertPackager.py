@@ -4,6 +4,7 @@ from __future__ import annotations
 from .constants import (
     DEVICE_PRODUCT,
     ENTITY_TYPE_ALERT,
+    ENTITY_TYPE_INCIDENT,
     MAX_EVENTS_PER_ALERT,
     VENDOR_NAME,
 )
@@ -190,9 +191,6 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
         alert.end_time = alert_time
         alert.Severity = severity
         alert.priority = alert_priority(severity)
-        case_tags = [str(tag).strip() for tag in (meta.get("case_tags") or []) if str(tag).strip()]
-        if case_tags:
-            alert.case_tags = case_tags
         incident_id = str(meta.get("incident_id") or "").strip()
         alert.extensions = {
             "vega_entity_type": entity_type,
@@ -204,6 +202,9 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
         )
         if entity_type == ENTITY_TYPE_ALERT:
             _attach_child_events(alert, record, record_time, logger_instance)
+        # Do not set AlertInfo.case_tags here. SecOps treats each ingest
+        # write plus playbook add_tag as a new catalog tag, which duplicates
+        # names. Events still carry labels for Apply Vega Labels as Tags.
         packages.append(alert)
         safe_log(
             logger_instance,
