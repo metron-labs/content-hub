@@ -9,11 +9,11 @@ Connector flow
    packaged. Each emitted record becomes one SOAR alert inside a case:
 
    Incidents + Alerts
-     Yes,No: incident case with related alerts nested; unrelated alerts as
-             their own cases.
-     Yes:    incident case with related alerts nested; skip unrelated alerts.
-     No:     incident-only case (no nested related alerts); unrelated alerts
-             as their own cases.
+     Yes,No: incident-only case, related alerts in separate batch cases,
+             unrelated alerts as their own cases.
+     Yes:    incident-only case plus related-alert batch cases; skip
+             unrelated alerts.
+     No:     incident-only case; unrelated alerts as their own cases.
 
    Incidents only (Yes, No, or Yes,No): incident-only cases. Do not fetch
      related or unrelated alerts.
@@ -51,6 +51,7 @@ from .mapping import (
     incident_case_title,
     incident_grouping_id,
     index_alert_records,
+    is_graphql_alert_id,
     merge_related_alert,
     record_alert_ids,
     record_display_id,
@@ -102,7 +103,7 @@ class IngestionPipeline:
         self.manager = manager
         self.entities = resolve_entities(entities_raw)
         self.max_fetch = max_fetch
-        self.max_alerts_per_case = max(2, int(max_alerts_per_case))
+        self.max_alerts_per_case = max(1, int(max_alerts_per_case))
         self.max_alert_event_fetches = max(0, int(max_alert_event_fetches))
         self.lookback_minutes = parse_lookback_minutes(lookback_minutes)
         self.backfill_days = parse_backfill_days(backfill_days)
@@ -285,11 +286,14 @@ class IngestionPipeline:
         }
 
     def _fetch_alerts_by_ids(self, alert_ids: list[str], window: dict) -> dict[str, dict]:
-        """Resolve full alert records (including vegaAlertId) for incident alertIds.
+        """Resolve full alert records (including labels) for incident alertIds.
 
         Vega getAlerts often returns 0 rows for alertIds without a time bound,
         so ID lookups use a wide createdAt window rather than the ingest window.
         Related alerts are often months older than the incident update.
+
+        Do not send human vegaAlertIds (VEGA-123) in alertIds: [ID!]. That can
+        fail the whole batch and leave stubs with empty labels.
         """
         unique: list[str] = []
         seen: set[str] = set()
@@ -301,6 +305,8 @@ class IngestionPipeline:
             unique.append(value)
         if not unique:
             return {}
+        graphql_ids = [item for item in unique if is_graphql_alert_id(item)]
+        vega_ids = [item for item in unique if item not in graphql_ids]
         collected: list[dict] = []
         batch_size = max(1, int(ALERT_ID_LOOKUP_BATCH))
         lookup_window = self._id_lookup_window(window)
@@ -322,16 +328,28 @@ class IngestionPipeline:
                 return []
             return [item for item in page if isinstance(item, dict)]
 
-        for index in range(0, len(unique), batch_size):
-            batch = unique[index : index + batch_size]
-            page = _lookup(batch, use_alert_ids=True)
-            collected.extend(page)
+        def _lookup_batches(ids: list[str], *, use_alert_ids: bool) -> None:
+            for index in range(0, len(ids), batch_size):
+                collected.extend(
+                    _lookup(ids[index : index + batch_size], use_alert_ids=use_alert_ids)
+                )
+
+        def _found_ids() -> set[str]:
             found: set[str] = set()
-            for alert in page:
+            for alert in collected:
                 found.update(record_alert_ids(alert))
-            missing = [item for item in batch if item not in found]
-            if missing:
-                collected.extend(_lookup(missing, use_alert_ids=False))
+            return found
+
+        _lookup_batches(graphql_ids, use_alert_ids=True)
+        missing_graphql = [item for item in graphql_ids if item not in _found_ids()]
+        if missing_graphql:
+            _lookup_batches(missing_graphql, use_alert_ids=False)
+        pending_vega = [item for item in vega_ids if item not in _found_ids()]
+        if pending_vega:
+            _lookup_batches(pending_vega, use_alert_ids=False)
+        missing_vega = [item for item in vega_ids if item not in _found_ids()]
+        if missing_vega:
+            _lookup_batches(missing_vega, use_alert_ids=True)
 
         if not collected:
             self._log(
@@ -400,7 +418,7 @@ class IngestionPipeline:
         self,
         alert: dict,
         incident: dict,
-        case_part: int = 1,
+        related_batch: int,
         case_tags: Optional[list[str]] = None,
     ) -> dict:
         incident_id = record_id(incident, ENTITY_TYPE_INCIDENT)
@@ -409,7 +427,7 @@ class IngestionPipeline:
         # Related alerts keep their own Vega labels. Empty stays empty on the
         # event (`[]`); never copy incident labels onto a related alert's
         # `labels` field. Incident names still go on case_tags (every batch)
-        # and incident_label_tags so overflow cases can tag from events.
+        # and incident_label_tags so related-alert cases can tag from events.
         if incident.get("timeline") and not alert.get("timeline"):
             alert["timeline"] = incident.get("timeline")
         description = str(alert.get("description") or "").strip()
@@ -424,16 +442,17 @@ class IngestionPipeline:
         return set_soar_meta(
             alert,
             soar_alert_type=SOAR_ALERT_TYPE_ALERT,
-            grouping_id=incident_grouping_id(incident_id, case_part),
+            grouping_id=incident_grouping_id(incident_id, related_batch),
             case_tags=list(case_tags or []),
             incident_label_tags=record_label_tags(incident),
-            case_title=incident_case_title(incident, case_part),
+            case_title=incident_case_title(incident, related_batch),
             grouping_time=record_timestamp(incident),
             incident_id=incident_id,
             incident_display_id=display_id,
             incident_name=record_name(incident),
             is_incident_case=True,
-            case_part=case_part,
+            is_related_batch=True,
+            case_part=related_batch,
         )
 
     def _append_incident_alert(
@@ -442,31 +461,28 @@ class IngestionPipeline:
         records: list[tuple[str, dict]],
         ingested: list[str],
         ingested_set: set[str],
-        case_part: int = 1,
         case_tags: Optional[list[str]] = None,
     ) -> bool:
         if self._remaining(len(records)) == 0:
             return False
         identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
         synthetic_key = f"incident:{identifier}"
-        if case_part > 1:
-            synthetic_key = f"{synthetic_key}:part:{case_part}"
         if not identifier or synthetic_key in ingested_set:
             return False
         display_id = record_display_id(incident, ENTITY_TYPE_INCIDENT)
         packaged = set_soar_meta(
             incident,
             soar_alert_type=SOAR_ALERT_TYPE_INCIDENT,
-            grouping_id=incident_grouping_id(identifier, case_part),
+            grouping_id=incident_grouping_id(identifier),
             case_tags=list(case_tags or []),
-            case_title=incident_case_title(incident, case_part),
+            case_title=incident_case_title(incident),
             grouping_time=record_timestamp(incident),
             incident_id=identifier,
             incident_display_id=display_id,
             incident_name=record_name(incident),
             is_incident_case=True,
-            case_part=case_part,
-            ticket_suffix=f"part:{case_part}" if case_part > 1 else None,
+            is_related_batch=False,
+            case_part=0,
         )
         records.append((ENTITY_TYPE_INCIDENT, packaged))
         self._mark_ingested(ingested, ingested_set, synthetic_key)
@@ -479,7 +495,7 @@ class IngestionPipeline:
         records: list[tuple[str, dict]],
         ingested: list[str],
         ingested_set: set[str],
-        case_part: int = 1,
+        related_batch: int,
         case_tags: Optional[list[str]] = None,
         apply_case_tags: bool = False,
     ) -> bool:
@@ -500,7 +516,7 @@ class IngestionPipeline:
             enriched = dict(alert)
             enriched.setdefault("alert_events", [])
         packaged = self._apply_incident_context(
-            enriched, incident, case_part, case_tags=case_tags
+            enriched, incident, related_batch, case_tags=case_tags
         )
         if apply_case_tags:
             packaged = set_soar_meta(packaged, apply_case_tags=True)
@@ -516,20 +532,25 @@ class IngestionPipeline:
         ingested: list[str],
         ingested_set: set[str],
     ) -> None:
-        """Incident case: 1 incident alert + related alerts, split at the 90 cap.
+        """Incident-only case, then related alerts in batches of up to 90.
 
-        Part 1: Vega incident alert + up to 89 related alerts (each with events).
-        Later parts: up to 90 related alerts only (incident is not duplicated).
-        Alerts in a part share case title, grouping id, and grouping time.
+        The Vega incident is never grouped with related alerts so closing the
+        incident case can resolve the incident without touching those alerts.
         """
-        chunks = chunk_case_alerts(related, self.max_alerts_per_case)
         identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
-        if len(chunks) > 1:
+        self._append_incident_alert(
+            incident,
+            records,
+            ingested,
+            ingested_set,
+            case_tags=collect_label_tags(incident),
+        )
+        chunks = chunk_case_alerts(related, self.max_alerts_per_case)
+        if chunks:
             self._log(
                 "info",
-                "Vega incident %s has %s related alert(s); splitting into %s "
-                "SOAR case(s) (max %s alerts per case). Part 1 includes the "
-                "incident alert; later parts are related alerts only.",
+                "Vega incident %s has %s related alert(s); incident-only case "
+                "plus %s related-alert case(s) (max %s alerts per case).",
                 identifier,
                 len(related),
                 len(chunks),
@@ -538,19 +559,7 @@ class IngestionPipeline:
         for index, chunk in enumerate(chunks, start=1):
             if self._remaining(len(records)) == 0:
                 break
-            # Incident labels → every batch case. Related-alert labels in this
-            # chunk → this case only (unique labels stay on the case that has
-            # those alerts).
             case_tags = collect_label_tags(incident, *chunk)
-            if index == 1:
-                self._append_incident_alert(
-                    incident,
-                    records,
-                    ingested,
-                    ingested_set,
-                    case_part=index,
-                    case_tags=case_tags,
-                )
             for offset, alert in enumerate(chunk):
                 if not self._append_related_alert(
                     alert,
@@ -558,9 +567,9 @@ class IngestionPipeline:
                     records,
                     ingested,
                     ingested_set,
-                    case_part=index,
+                    related_batch=index,
                     case_tags=case_tags,
-                    apply_case_tags=index > 1 and offset == 0,
+                    apply_case_tags=offset == 0,
                 ):
                     if self._remaining(len(records)) == 0:
                         return

@@ -15,8 +15,6 @@ PING_SCRIPT_NAME = f"{INTEGRATION_NAME} - Ping"
 GET_ALERT_EVENTS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Alert Events"
 GET_INCIDENT_TIMELINE_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Incident Timeline"
 GET_INCIDENT_DETAILS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Incident Details"
-SET_DETECTIONS_STATE_SCRIPT_NAME = f"{INTEGRATION_NAME} - Set Detections State"
-UPDATE_DETECTIONS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Update Detections"
 UPDATE_ALERT_SCRIPT_NAME = f"{INTEGRATION_NAME} - Update Alert"
 UPDATE_INCIDENT_SCRIPT_NAME = f"{INTEGRATION_NAME} - Update Incident"
 APPLY_VEGA_LABELS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Apply Vega Labels as Tags"
@@ -24,6 +22,11 @@ APPLY_VEGA_LABELS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Apply Vega Labels as Tags
 CONNECTOR_NAME = "Vega Alerts and Incidents Connector"
 CHECKPOINT_PROPERTY_KEY = "vega_ingestion_checkpoint"
 REMEDIATION_PROPERTY_KEY = "vega_sync_state"
+SOAR_CASE_SEARCH_PATH = "external/v1/search/CaseSearchEverything"
+SOAR_CASE_DETAILS_PATH = "external/v1/cases/GetCaseFullDetails/{case_id}"
+SOAR_SEARCH_PAGE_SIZE = 50
+# CaseSearchEverything: 1 = last modification (close updates this).
+SOAR_TIME_RANGE_MODIFIED = 1
 
 DEFAULT_API_ROOT = "https://api.vega.io"
 LOGIN_PATH = "/api/v1/login_machine"
@@ -42,8 +45,10 @@ MAX_EVENTS_PER_ALERT = 200
 # (SOAR creates one case per AlertInfo unless grouping is enabled).
 NESTED_RELATED_KEY = "nested_related_alerts"
 # Google SecOps hard cap is 90 alerts per case (default grouping is 20).
-# Used here to chunk related-alert events onto overflow incident packages.
+# Related Vega alerts are their own cases, chunked at this cap. The Vega
+# incident is always a separate one-alert case.
 MAX_ALERTS_PER_CASE = 90
+SYNC_RESOLVED_STATUS = "RESOLVED"
 ALERT_ID_LOOKUP_BATCH = 10
 # getAlertsEvents is one HTTP call per alert. A large incident (800+ alerts)
 # will 429 / GraphQL-fail if we fetch events for every related alert in one run.
@@ -96,7 +101,6 @@ INCIDENT_STATUS_OPTIONS = (
 VERDICT_OPTIONS = ("MALICIOUS", "SUSPICIOUS", "BENIGN", "INCONCLUSIVE", "NA")
 ENTITY_OPTIONS = ("Alerts", "Incidents")
 RELATED_OPTIONS = ("Yes", "No")
-DETECTION_STATES = ("ENABLED", "DISABLED", "TEST_MODE")
 
 SEVERITY_TO_ALERT_PRIORITY = {
     "CRITICAL": 100,
@@ -401,33 +405,6 @@ query GetIncidentTimeline($incidentId: ID!, $limit: Int, $offset: Int) {
 }
 """.strip()
 
-SET_DETECTIONS_STATE_MUTATION = """
-mutation SetDetectionsState($input: SetDetectionsStateInput!) {
-  setDetectionsState(input: $input) { ids }
-}
-""".strip()
-
-UPDATE_DETECTIONS_MUTATION = """
-mutation UpdateDetections($input: UpdateDetectionsInput!) {
-  updateDetections(input: $input) {
-    results {
-      name
-      status
-      errors { code message field }
-      detection {
-        id
-        name
-        severity
-        state
-        status
-        tags
-      }
-    }
-    summary { requested valid invalid committed }
-  }
-}
-""".strip()
-
 UPDATE_ALERTS_MUTATION = """
 mutation UpdateAlerts($input: UpdateAlertsInput!) {
   updateAlerts(input: $input) {
@@ -460,6 +437,25 @@ mutation UpdateIncidents($input: UpdateIncidentsInput!) {
       verdictReasoning
       updatedAt
     }
+    errors { code message }
+  }
+}
+""".strip()
+
+# Close-sync only sets status. Selection is id/status plus errors.
+UPDATE_ALERTS_STATUS_MUTATION = """
+mutation UpdateAlertsStatus($input: UpdateAlertsInput!) {
+  updateAlerts(input: $input) {
+    alerts { id vegaAlertId status }
+    error { code message }
+  }
+}
+""".strip()
+
+UPDATE_INCIDENTS_STATUS_MUTATION = """
+mutation UpdateIncidentsStatus($input: UpdateIncidentsInput!) {
+  updateIncidents(input: $input) {
+    incidents { incidentId status }
     errors { code message }
   }
 }

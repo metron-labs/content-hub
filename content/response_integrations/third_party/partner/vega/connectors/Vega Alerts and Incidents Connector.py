@@ -3,16 +3,16 @@ Vega Alerts and Incidents Connector.
 
 1. Read connector configuration (API, entities, filters, Has Related Incidents).
 2. IngestionPipeline applies those filters:
-   - Incidents+Alerts+Yes: incident alert plus related Vega alerts as alerts
-     on the same case (shared case title / Rule Generator, not Vega Alert vs
-     Vega Incident).
+   - Incidents+Alerts+Yes: one incident-only case, plus related Vega alerts
+     in separate batch cases (up to 90 alerts each).
    - Incidents+Alerts+No: incident-only case plus standalone unrelated alerts.
    - Incidents only: Vega Incident cases only (no related or unrelated alerts).
    - Alerts+Yes: one case per related Vega alert (no incident case).
    - Alerts+No: one case per unrelated Vega alert.
    Each packaged record is a SOAR alert inside its case.
 3. Packager turns records into SOAR AlertInfo objects. Optional outbound
-   sync closes the matching Vega incident or alert when the SOAR case closes.
+   sync sets Vega status to RESOLVED when the matching SOAR case closes
+   (incident case → incident only; alert/batch case → those alerts only).
 """
 from __future__ import annotations
 

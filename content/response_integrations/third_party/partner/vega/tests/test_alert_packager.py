@@ -76,8 +76,8 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
             "labels": [{"name": "phish", "color": "#ff0000"}],
             "alert_events": [{"name": "login"}],
         },
-        grouping_id="Vega:incident:inc-1",
-        case_title=case_title,
+        grouping_id="Vega:incident:inc-1:batch:1",
+        case_title=f"{case_title} (batch 1)",
         grouping_time="2026-07-28T11:22:43Z",
         incident_id="inc-1",
         is_incident_case=True,
@@ -110,7 +110,7 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
     assert len(packages) == 3
     incident_alert, related_alert, standalone = packages
     assert incident_alert.rule_generator == case_title
-    assert related_alert.rule_generator == case_title
+    assert related_alert.rule_generator == f"{case_title} (batch 1)"
     assert incident_alert.name.startswith("Vega Incident - VINC-1 - Campaign")
     assert related_alert.name.startswith("Vega Alert - VALERT-1 - Phish")
     assert "Vega Alert" not in incident_alert.rule_generator
@@ -121,7 +121,7 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
     assert related_alert.device_product == "Vega"
     assert standalone.device_product == "Vega"
     assert incident_alert.source_grouping_identifier == "Vega:incident:inc-1"
-    assert related_alert.source_grouping_identifier == "Vega:incident:inc-1"
+    assert related_alert.source_grouping_identifier == "Vega:incident:inc-1:batch:1"
     assert standalone.source_grouping_identifier == "Vega:alert:alert-3"
     assert incident_alert.start_time == related_alert.start_time
     assert incident_alert.case_tags is None
@@ -136,7 +136,7 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
     assert len(related_alert.events) == 2
     assert related_alert.events[0]["name"].startswith("Vega Alert - VALERT-1 - Phish")
     assert related_alert.events[1]["name"] == "login"
-    assert related_alert.events[0]["source_grouping_identifier"] == "Vega:incident:inc-1"
+    assert related_alert.events[0]["source_grouping_identifier"] == "Vega:incident:inc-1:batch:1"
     assert json.loads(incident_alert.events[0]["labels"]) == [
         {"name": "campaign", "color": "#00aa00"}
     ]
@@ -145,6 +145,10 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
         {"name": "phish", "color": "#ff0000"}
     ]
     assert related_alert.events[0]["vega_label_names"] == "phish"
+    assert json.loads(related_alert.events[1]["labels"]) == [
+        {"name": "phish", "color": "#ff0000"}
+    ]
+    assert related_alert.events[1]["vega_label_names"] == "phish"
     assert json.loads(standalone.events[0]["labels"]) == [
         {"name": "noise", "color": "#888888"}
     ]
@@ -173,8 +177,8 @@ def test_packager_keeps_empty_labels_and_incident_tag_names() -> None:
             "name": "Phish",
             "labels": [],
         },
-        grouping_id="Vega:incident:inc-1",
-        case_title=case_title,
+        grouping_id="Vega:incident:inc-1:batch:1",
+        case_title=f"{case_title} (batch 1)",
         incident_id="inc-1",
         incident_label_tags=["campaign"],
         is_incident_case=True,

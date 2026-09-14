@@ -22,6 +22,7 @@ from core.mapping import (
     incident_alert_ids,
     incident_case_title,
     incident_grouping_id,
+    is_graphql_alert_id,
     merge_related_alert,
     pending_case_tags,
     record_id,
@@ -45,6 +46,8 @@ def test_case_display_name_uses_entity_display_id_and_name() -> None:
     ).startswith("Vega Incident - VINC-1 - Campaign")
     incident = {"vegaUniqueIncidentId": "VINC-1", "name": "Campaign"}
     assert incident_case_title(incident).startswith("Vega Incident - VINC-1 - Campaign")
+    assert "(batch" not in incident_case_title(incident)
+    assert incident_case_title(incident, 1).endswith("(batch 1)")
     assert incident_case_title(incident, 2).endswith("(batch 2)")
     uuid = "019e1b27-5119-7822-bde3-344b13e481cf"
     assert case_display_name(
@@ -329,8 +332,13 @@ def test_related_incident_ref() -> None:
 
 def test_grouping_ids() -> None:
     assert incident_grouping_id("inc-1") == "Vega:incident:inc-1"
+    assert incident_grouping_id("inc-1", 0) == "Vega:incident:inc-1"
+    assert incident_grouping_id("inc-1", 1) == "Vega:incident:inc-1:batch:1"
     assert incident_grouping_id("inc-1", 2) == "Vega:incident:inc-1:batch:2"
     assert alert_grouping_id("a-1") == "Vega:alert:a-1"
+    assert is_graphql_alert_id("019e1b27-5119-7822-bde3-344b13e481cf")
+    assert not is_graphql_alert_id("VEGA-3219")
+    assert not is_graphql_alert_id("alert-1")
 
 
 def test_incident_alert_ids_and_case_chunks() -> None:
@@ -343,12 +351,12 @@ def test_incident_alert_ids_and_case_chunks() -> None:
     }
     assert incident_alert_ids(incident) == ["alert-1", "alert-2"]
     chunks = chunk_case_alerts(["a", "b", "c", "d", "e"], max_alerts_per_case=3)
-    assert chunks == [["a", "b"], ["c", "d", "e"]]
-    assert chunk_case_alerts([], max_alerts_per_case=90) == [[]]
+    assert chunks == [["a", "b", "c"], ["d", "e"]]
+    assert chunk_case_alerts([], max_alerts_per_case=90) == []
     overflow = chunk_case_alerts(list(range(806)), max_alerts_per_case=90)
-    assert len(overflow[0]) == 89
-    assert all(len(chunk) == 90 for chunk in overflow[1:-1])
-    assert len(overflow[-1]) == 87
+    assert len(overflow[0]) == 90
+    assert all(len(chunk) == 90 for chunk in overflow[:-1])
+    assert len(overflow[-1]) == 86
     assert sum(len(chunk) for chunk in overflow) == 806
     assert len(overflow) == 9
 
@@ -489,8 +497,13 @@ def test_incident_event_maps_get_incidents_fields() -> None:
 
 def test_child_events_stay_scoped_to_parent_alert() -> None:
     parent = set_soar_meta(
-        {"id": "alert-1", "vegaAlertId": "VALERT-1"},
+        {
+            "id": "alert-1",
+            "vegaAlertId": "VALERT-1",
+            "labels": [{"name": "phish", "color": "#ff0000"}],
+        },
         incident_id="inc-1",
+        incident_label_tags=["campaign"],
     )
     event = build_vega_alert_event_dict(
         parent, {"name": "login", "src_ip": "1.1.1.1"}, 1, 1, 0
@@ -499,6 +512,9 @@ def test_child_events_stay_scoped_to_parent_alert() -> None:
     assert event["vega_id"] == "alert-1"
     assert event["vega_incident_id"] == "inc-1"
     assert event["vega_entity_type"] == "Alert Event"
+    assert json.loads(event["labels"]) == [{"name": "phish", "color": "#ff0000"}]
+    assert event["vega_label_names"] == "phish"
+    assert event["vega_incident_label_names"] == "campaign"
 
 
 def test_alert_event_payload_maps_dynamic_api_fields() -> None:
@@ -530,7 +546,25 @@ def test_alert_event_payload_maps_dynamic_api_fields() -> None:
     assert "source_grouping_identifier" not in event
 
 
-def test_extract_sync_targets_prefers_incident_and_skips_child_events() -> None:
+def test_extract_sync_targets_incident_case_ignores_related_alerts() -> None:
+    targets = extract_sync_targets(
+        {
+            "events": [
+                {"vega_entity_type": "Incident", "vega_id": "inc-1"},
+                {
+                    "vega_entity_type": "Alert",
+                    "vega_id": "alert-1",
+                    "vega_incident_id": "inc-1",
+                },
+            ]
+        }
+    )
+    assert targets["mode"] == "incident"
+    assert targets["incident_ids"] == ["inc-1"]
+    assert targets["alert_ids"] == []
+
+
+def test_extract_sync_targets_related_batch_does_not_close_incident() -> None:
     targets = extract_sync_targets(
         {
             "events": [
@@ -548,8 +582,18 @@ def test_extract_sync_targets_prefers_incident_and_skips_child_events() -> None:
             ]
         }
     )
-    assert targets["incidents"] == ["inc-1"]
-    assert targets["alerts"] == ["alert-1"]
+    assert targets["mode"] == "alerts"
+    assert targets["incident_ids"] == []
+    assert targets["alert_ids"] == ["alert-1"]
+
+
+def test_extract_sync_targets_unrelated_alert() -> None:
+    targets = extract_sync_targets(
+        {"events": [{"vega_entity_type": "Alert", "vega_id": "alert-3"}]}
+    )
+    assert targets["mode"] == "alerts"
+    assert targets["incident_ids"] == []
+    assert targets["alert_ids"] == ["alert-3"]
 
 
 def test_soar_meta_round_trip() -> None:

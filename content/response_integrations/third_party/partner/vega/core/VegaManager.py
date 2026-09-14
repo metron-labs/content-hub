@@ -32,12 +32,13 @@ from .constants import (
     QUERY_PATH,
     SERVER_ERROR_RETRIES,
     SERVER_ERROR_WAIT_SECONDS,
-    SET_DETECTIONS_STATE_MUTATION,
+    SYNC_RESOLVED_STATUS,
     TIMELINE_MAX_FETCH,
     TIMELINE_PAGE_SIZE,
     UPDATE_ALERTS_MUTATION,
-    UPDATE_DETECTIONS_MUTATION,
+    UPDATE_ALERTS_STATUS_MUTATION,
     UPDATE_INCIDENTS_MUTATION,
+    UPDATE_INCIDENTS_STATUS_MUTATION,
 )
 from .exceptions import (
     VegaBadRequestException,
@@ -575,19 +576,6 @@ class VegaManager:
         )
         return records[0] if records else {}
 
-    def set_detections_state(self, ids: list[str], state: str) -> dict:
-        data = self.graphql(
-            SET_DETECTIONS_STATE_MUTATION,
-            {"input": {"ids": ids, "state": state}},
-        )
-        return data.get("setDetectionsState") or {}
-
-    def update_detections(self, detections: list[dict]) -> dict:
-        data = self.graphql(
-            UPDATE_DETECTIONS_MUTATION,
-            {"input": {"detections": detections}},
-        )
-        return data.get("updateDetections") or {}
 
     def update_alerts(self, payload: dict) -> dict:
         data = self.graphql(UPDATE_ALERTS_MUTATION, {"input": payload})
@@ -599,6 +587,25 @@ class VegaManager:
 
     def update_incidents(self, payload: dict) -> dict:
         data = self.graphql(UPDATE_INCIDENTS_MUTATION, {"input": payload})
+        envelope = data.get("updateIncidents") or {}
+        errors = envelope.get("errors") or []
+        if errors:
+            message = errors[0].get("message") if isinstance(errors[0], dict) else str(errors[0])
+            raise VegaException(message or "updateIncidents failed.")
+        return envelope
+
+    def resolve_alerts(self, alert_ids: list[str]) -> dict:
+        payload = {"alertIds": list(alert_ids), "status": SYNC_RESOLVED_STATUS}
+        data = self.graphql(UPDATE_ALERTS_STATUS_MUTATION, {"input": payload})
+        envelope = data.get("updateAlerts") or {}
+        error = envelope.get("error") or {}
+        if error.get("code") or error.get("message"):
+            raise VegaException(error.get("message") or "updateAlerts failed.")
+        return envelope
+
+    def resolve_incidents(self, incident_ids: list[str]) -> dict:
+        payload = {"incidentIds": list(incident_ids), "status": SYNC_RESOLVED_STATUS}
+        data = self.graphql(UPDATE_INCIDENTS_STATUS_MUTATION, {"input": payload})
         envelope = data.get("updateIncidents") or {}
         errors = envelope.get("errors") or []
         if errors:

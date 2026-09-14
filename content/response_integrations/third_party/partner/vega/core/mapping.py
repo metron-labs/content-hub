@@ -17,6 +17,9 @@ from .constants import (
 )
 
 _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_]")
+_GRAPHQL_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 _MAX_EVENT_FIELD_CHARS = 10000
 _MAX_DETAILS_CHARS = 100000
 _MAX_EXTRA_FIELDS = 80
@@ -45,6 +48,10 @@ _SKIP_PAYLOAD_KEYS = {
     "event_time",
     "datetime",
     "date",
+    "labels",
+    "vega_label_names",
+    "vega_labels",
+    "vega_incident_label_names",
 }
 _ENTITY_ALIASES = {
     "src_ip": "ip",
@@ -127,6 +134,11 @@ def record_alert_ids(record: dict) -> list[str]:
     return ids
 
 
+def is_graphql_alert_id(value: str) -> bool:
+    """True for UUID alertIds safe in getAlerts(alertIds: [ID!])."""
+    return bool(_GRAPHQL_ID_RE.match(str(value or "").strip()))
+
+
 def record_display_id(record: dict, entity_type: str) -> str:
     """Human-facing Vega ID used in the SOAR alert/case title.
 
@@ -154,23 +166,31 @@ def case_display_name(record: dict, entity_type: str) -> str:
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} TEST 56"
-    return f"Vega {entity_type} - {name} TEST 56"
+        return f"Vega {entity_type} - {display_id} - {name} TEST 64"
+    return f"Vega {entity_type} - {name} TEST 64"
 
 
-def incident_case_title(record: dict, case_part: int = 1) -> str:
-    """Shared SOAR case title for an incident and its nested related alerts."""
+def incident_case_title(record: dict, related_batch: int = 0) -> str:
+    """SOAR case title for an incident-only case or a related-alert batch.
+
+    related_batch 0 is the Vega incident case. related_batch >= 1 is a
+    related-alert case named after the incident with ``(batch N)``.
+    """
     title = case_display_name(record, ENTITY_TYPE_INCIDENT)
-    if case_part and case_part > 1:
-        return f"{title} (batch {case_part})"
+    if related_batch and related_batch > 0:
+        return f"{title} (batch {related_batch})"
     return title
 
 
-def incident_grouping_id(incident_id: str, case_part: int = 1) -> str:
-    """SOAR source grouping key. Overflow cases use :part:N so they stay separate."""
+def incident_grouping_id(incident_id: str, related_batch: int = 0) -> str:
+    """SOAR source grouping key. Incident and related-alert batches stay separate.
+
+    related_batch 0 is ``Vega:incident:<id>``. related_batch >= 1 is
+    ``Vega:incident:<id>:batch:N`` so the grouping rule does not merge them.
+    """
     base = f"{VENDOR_NAME}:incident:{incident_id}"
-    if case_part and case_part > 1:
-        return f"{base}:batch:{case_part}"
+    if related_batch and related_batch > 0:
+        return f"{base}:batch:{related_batch}"
     return base
 
 
@@ -393,22 +413,18 @@ def incident_alert_ids(incident: dict) -> list[str]:
 
 
 def chunk_case_alerts(related_alerts: list, max_alerts_per_case: int) -> list[list]:
-    """Split related alerts so each SOAR case stays within the 90-alert cap.
+    """Split related alerts into SOAR cases of at most ``max`` alerts each.
 
-    First case reserves 1 slot for the Vega incident alert, so it holds
-    (max - 1) related alerts. Overflow cases are related alerts only and
-    hold `max` alerts each. Zero related alerts still yields one empty
-    chunk (incident-only case).
+    The Vega incident is a separate case, so every chunk can hold the full
+    cap (90). Zero related alerts yields no chunks.
     """
     limit = max(1, int(max_alerts_per_case))
-    first_cap = max(1, limit - 1)
     if not related_alerts:
-        return [[]]
-    first = list(related_alerts[:first_cap])
-    rest = list(related_alerts[first_cap:])
-    chunks = [first]
-    for index in range(0, len(rest), limit):
-        chunks.append(list(rest[index : index + limit]))
+        return []
+    chunks: list[list] = []
+    items = list(related_alerts)
+    for index in range(0, len(items), limit):
+        chunks.append(items[index : index + limit])
     return chunks
 
 
@@ -676,6 +692,32 @@ _INCIDENT_API_FIELDS = (
 )
 
 
+def _apply_label_fields(
+    event: dict, record: dict, *, copy_incident_names: bool
+) -> None:
+    """Put this Vega record's labels on a SOAR event.
+
+    Incident names stay on `vega_incident_label_names` for related alerts;
+    they are not copied onto `labels`.
+    """
+    event["labels"] = _soar_value(
+        _display_labels(record.get("labels") if isinstance(record, dict) else None)
+    )
+    label_names = record_label_tags(record)
+    if label_names:
+        event["vega_label_names"] = ",".join(label_names)
+    if not copy_incident_names:
+        return
+    meta = soar_meta(record)
+    incident_label_names = [
+        str(name).strip()
+        for name in (meta.get("incident_label_tags") or [])
+        if str(name).strip()
+    ]
+    if incident_label_names:
+        event["vega_incident_label_names"] = ",".join(incident_label_names)
+
+
 def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: int) -> dict:
     """Map a Vega alert or incident onto a SOAR event using API fields only.
 
@@ -730,22 +772,9 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
     else:
         _map_api_fields(event, record, _ALERT_API_FIELDS)
     _set_mapped(event, "vega_unique_incident_id", incident_display_id)
-    # Always keep `labels` in the Default event section, including `[]` when
-    # Vega returned none. Do not copy incident labels onto related/unrelated
-    # alert events; those stay on this record only.
-    event["labels"] = _soar_value(
-        _display_labels(record.get("labels") if isinstance(record, dict) else None)
+    _apply_label_fields(
+        event, record, copy_incident_names=entity_type == ENTITY_TYPE_ALERT
     )
-    label_names = record_label_tags(record)
-    if label_names:
-        event["vega_label_names"] = ",".join(label_names)
-    incident_label_names = [
-        str(name).strip()
-        for name in (meta.get("incident_label_tags") or [])
-        if str(name).strip()
-    ]
-    if incident_label_names and entity_type == ENTITY_TYPE_ALERT:
-        event["vega_incident_label_names"] = ",".join(incident_label_names)
     details = _details_payload(record)
     if details:
         event["details"] = details
@@ -865,6 +894,9 @@ def build_vega_alert_event_dict(
             continue
         event[safe_key] = _soar_value(value)
         extra += 1
+    # Related-alert cases are mostly these child events. Copy the parent
+    # Vega Alert labels so Default/Events is not an empty `labels` list.
+    _apply_label_fields(event, parent, copy_incident_names=True)
     details_payload = {
         key: value for key, value in payload.items() if _has_mapped_value(value)
     }

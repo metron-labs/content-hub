@@ -119,12 +119,12 @@ def _attach_child_events(alert, record: dict, event_time: int, logger_instance=N
 def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=None) -> list:
     """Turn pipeline records into SOAR AlertInfo packages.
 
-    Incident case: one AlertInfo for the Vega incident plus one AlertInfo per
-    related Vega alert. Each alert keeps its own Name (Vega Incident vs Vega
-    Alert). They share Product, grouping id, grouping time, and Rule Generator
-    (the incident case title) so SOAR can group them when a Product=Vega rule
-    uses Source Grouping Identifier. Standalone Vega alerts keep their own
-    title and grouping id.
+    Incident case: one AlertInfo for the Vega incident. Related Vega alerts
+    are separate AlertInfo objects with a batch grouping id so they form their
+    own cases. Each alert keeps its own Name (Vega Incident vs Vega Alert).
+    Related batches share Product, grouping time, and Rule Generator (the
+    incident title plus batch N). Standalone Vega alerts keep their own title
+    and grouping id.
     """
     from soar_sdk.SiemplifyConnectorsDataModel import AlertInfo
     from soar_sdk.SiemplifyUtils import unix_now
