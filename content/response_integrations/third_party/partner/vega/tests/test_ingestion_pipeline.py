@@ -73,7 +73,6 @@ def _pipeline(
     has_related: str = "Yes,No",
     max_fetch: int = 20,
     max_alerts_per_case: int = 90,
-    max_alert_event_fetches: int = 25,
 ):
     return IngestionPipeline(
         manager=manager,
@@ -83,7 +82,6 @@ def _pipeline(
         has_related=has_related,
         max_fetch=max_fetch,
         max_alerts_per_case=max_alerts_per_case,
-        max_alert_event_fetches=max_alert_event_fetches,
     )
 
 
@@ -742,7 +740,7 @@ def test_alert_id_lookup_falls_back_to_related_window_query() -> None:
     assert any(call.get("hasRelatedIncidents") is True for call in manager.alert_calls)
 
 
-def test_event_fetches_are_capped_per_cycle() -> None:
+def test_every_related_alert_fetches_events() -> None:
     manager = FakeManager()
     manager.incidents = [
         {
@@ -766,10 +764,84 @@ def test_event_fetches_are_capped_per_cycle() -> None:
         entities="Alerts,Incidents",
         has_related="Yes",
         max_fetch=20,
-        max_alert_event_fetches=2,
     ).run()
     related = [item for item in summary["records"] if item[0] == ENTITY_TYPE_ALERT]
     assert len(related) == 5
-    assert calls["n"] == 2
+    assert calls["n"] == 5
     with_events = [item for item in related if item[1].get("alert_events")]
-    assert len(with_events) == 2
+    assert len(with_events) == 5
+    assert summary["incomplete"] is False
+    assert summary["checkpoint"]["incomplete"] is False
+
+
+def test_timeout_saves_watermark_and_next_run_continues() -> None:
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "lastUpdated": "2026-01-01T00:00:00Z",
+            "alerts": [{"alertId": "alert-1"}, {"alertId": "alert-2"}],
+        }
+    ]
+    manager.alerts = [
+        {
+            "id": "alert-1",
+            "name": "A1",
+            "createdAt": "2026-01-02T00:00:00Z",
+            "updatedAt": "2026-01-02T00:00:00Z",
+            "relatedIncidents": [{"incidentId": "inc-1"}],
+        },
+        {
+            "id": "alert-2",
+            "name": "A2",
+            "createdAt": "2026-01-03T00:00:00Z",
+            "updatedAt": "2026-01-03T00:00:00Z",
+            "relatedIncidents": [{"incidentId": "inc-1"}],
+        },
+    ]
+    manager.alert_events = {
+        "alert-1": [{"name": "e1"}],
+        "alert-2": [{"name": "e2"}],
+    }
+    first = _pipeline(
+        manager, entities="Alerts,Incidents", has_related="Yes", max_fetch=20
+    ).run(deadline_monotonic=0)
+    assert first["incomplete"] is True
+    assert [kind for kind, _ in first["records"]] == [ENTITY_TYPE_INCIDENT]
+    assert first["checkpoint"]["watermark"] == "2026-01-01T00:00:00Z"
+    assert first["checkpoint"]["incomplete"] is True
+    assert first["checkpoint"]["query_mode"] == "created"
+
+    second = _pipeline(
+        manager, entities="Alerts,Incidents", has_related="Yes", max_fetch=20
+    ).run(checkpoint=first["checkpoint"])
+    ids = [record.get("id") for _, record in second["records"]]
+    assert ids == ["alert-1", "alert-2"]
+    assert [item[1]["alert_events"][0]["name"] for item in second["records"]] == [
+        "e1",
+        "e2",
+    ]
+    assert second["incomplete"] is False
+
+
+def test_incomplete_created_window_keeps_createdat_filters() -> None:
+    from datetime import datetime, timezone
+
+    from core.utils import compute_time_window
+
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    window = compute_time_window(
+        {
+            "watermark": "2026-01-01T00:00:00Z",
+            "incomplete": True,
+            "query_mode": "created",
+        },
+        backfill_days=0,
+        lookback_minutes=5,
+        now=now,
+    )
+    assert window["query_mode"] == "created"
+    assert window["from"] is not None
+    assert window["updated_from"] is None

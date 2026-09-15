@@ -56,6 +56,14 @@ from .utils import classify_credential_error, normalize_api_root, require_secret
 logger = logging.getLogger(__name__)
 
 
+def is_rate_limit_message(value: Any) -> bool:
+    """True for Vega HTTP 429 text and GraphQL 'Rate limit exceeded' bodies."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return "rate limit" in text or "too many requests" in text
+
+
 def _unwrap_json(value: Any, *, depth: int = 3) -> Any:
     """Decode JSON strings, including double-encoded payloads."""
     current = value
@@ -234,14 +242,25 @@ class VegaManager:
         except requests.ConnectionError as exc:
             raise VegaValidationException(MSG_INVALID_API_ROOT) from exc
 
-    def _request(self, method: str, path: str, allow_relogin: bool = True, **kwargs):
+    def _wait_rate_limit(self, source: str) -> int:
+        wait = self.rate_limiter.on_429()
+        self._log("warning", "Vega %s rate limit; waiting %s seconds.", source, wait)
+        return wait
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        allow_relogin: bool = True,
+        apply_success: bool = True,
+        **kwargs,
+    ):
         server_attempts = 0
         while True:
             response = self._send(method, path, **kwargs)
             status = response.status_code
             if status == 429:
-                wait = self.rate_limiter.on_429()
-                self._log("warning", "Vega HTTP 429; waiting %s seconds.", wait)
+                self._wait_rate_limit("HTTP 429")
                 continue
             if status >= 500:
                 if path == LOGIN_PATH:
@@ -261,7 +280,8 @@ class VegaManager:
                 continue
             if not (200 <= status < 300):
                 self._raise_http(response, path)
-            self.rate_limiter.on_success()
+            if apply_success:
+                self.rate_limiter.on_success()
             return response
 
     def _auth_headers(self) -> dict:
@@ -299,25 +319,31 @@ class VegaManager:
         return self._jwt
 
     def graphql(self, query: str, variables: Optional[dict] = None) -> dict:
-        response = self._request(
-            "POST",
-            QUERY_PATH,
-            headers=self._auth_headers(),
-            json={"query": query, "variables": variables or {}},
-        )
-        try:
-            payload = response.json()
-        except Exception as exc:
-            raise VegaException("Vega GraphQL returned a non-JSON body.") from exc
-        if payload.get("errors"):
-            message = payload["errors"][0].get("message") if payload["errors"] else ""
-            classified = classify_credential_error(message)
-            if classified:
-                raise VegaUnauthorizedException(classified)
-            detail = str(message or "").strip() or "Vega request failed. Please try again."
-            self._log("error", "Vega GraphQL error: %s", detail)
-            raise VegaException(detail)
-        return payload.get("data") or {}
+        while True:
+            response = self._request(
+                "POST",
+                QUERY_PATH,
+                headers=self._auth_headers(),
+                json={"query": query, "variables": variables or {}},
+                apply_success=False,
+            )
+            try:
+                payload = response.json()
+            except Exception as parse_error:
+                raise VegaException("Vega GraphQL returned a non-JSON body.") from parse_error
+            if payload.get("errors"):
+                message = payload["errors"][0].get("message") if payload["errors"] else ""
+                classified = classify_credential_error(message)
+                if classified:
+                    raise VegaUnauthorizedException(classified)
+                detail = str(message or "").strip() or "Vega request failed. Please try again."
+                if is_rate_limit_message(detail):
+                    self._wait_rate_limit("GraphQL")
+                    continue
+                self._log("error", "Vega GraphQL error: %s", detail)
+                raise VegaException(detail)
+            self.rate_limiter.on_success()
+            return payload.get("data") or {}
 
     def test_connection(self) -> bool:
         """Validate API Root, Access Key, and Access Key ID before ingest."""
@@ -354,12 +380,18 @@ class VegaManager:
             error = envelope.get("error") or envelope.get("errors") or {}
             if isinstance(error, dict) and (error.get("code") or error.get("message")):
                 message = error.get("message") or "Vega query failed."
+                if is_rate_limit_message(message):
+                    self._wait_rate_limit("GraphQL")
+                    continue
                 classified = classify_credential_error(message)
                 if classified:
                     raise VegaUnauthorizedException(classified)
                 raise VegaException(message)
             if isinstance(error, list) and error:
                 message = error[0].get("message") if isinstance(error[0], dict) else str(error[0])
+                if is_rate_limit_message(message):
+                    self._wait_rate_limit("GraphQL")
+                    continue
                 classified = classify_credential_error(message)
                 if classified:
                     raise VegaUnauthorizedException(classified)
@@ -383,18 +415,23 @@ class VegaManager:
 
         The full query is tried first. If Vega rejects it (unknown field/type),
         later calls use the compatible query so ingest can still create cases.
+        Rate-limit errors wait and retry inside graphql(); they must not switch
+        the query to the compatible variant.
         """
         try:
             return self._paged(
                 self._alerts_query, "getAlerts", "alerts", variables, max_records
             )
-        except VegaException as exc:
-            if self._alerts_query is GET_ALERTS_QUERY_COMPAT:
+        except VegaException as query_error:
+            if (
+                isinstance(query_error, VegaRateLimitException)
+                or self._alerts_query is GET_ALERTS_QUERY_COMPAT
+            ):
                 raise
             self._log(
                 "warning",
                 "Full getAlerts query failed (%s); retrying with compatible query.",
-                exc,
+                query_error,
             )
             self._alerts_query = GET_ALERTS_QUERY_COMPAT
             return self._paged(
@@ -406,13 +443,16 @@ class VegaManager:
             return self._paged(
                 self._incidents_query, "getIncidents", "incidents", variables, max_records
             )
-        except VegaException as exc:
-            if self._incidents_query is GET_INCIDENTS_QUERY_COMPAT:
+        except VegaException as query_error:
+            if (
+                isinstance(query_error, VegaRateLimitException)
+                or self._incidents_query is GET_INCIDENTS_QUERY_COMPAT
+            ):
                 raise
             self._log(
                 "warning",
                 "Full getIncidents query failed (%s); retrying without nested vegaAlertId.",
-                exc,
+                query_error,
             )
             self._incidents_query = GET_INCIDENTS_QUERY_COMPAT
             return self._paged(
@@ -466,6 +506,10 @@ class VegaManager:
                 envelope = {}
             error = envelope.get("error") or {}
             if isinstance(error, dict) and (error.get("code") or error.get("message")):
+                message = error.get("message") or error.get("code")
+                if is_rate_limit_message(message):
+                    self._wait_rate_limit("GraphQL")
+                    continue
                 if collected:
                     self._log(
                         "warning",

@@ -5,6 +5,8 @@ Connector flow
 1. The connector reads instance configuration (entities, lookback, filters,
    Has Related Incidents) and constructs this pipeline.
 2. `run()` computes the time window from checkpoint + lookback/backfill.
+   If a cycle stops early to avoid connector timeout, the checkpoint stores
+   the last packaged record timestamp so the next run continues from there.
 3. Vega Entities to Fetch and Has Related Incidents together decide what is
    packaged. Each emitted record becomes one SOAR alert inside a case:
 
@@ -28,6 +30,8 @@ Connector flow
 from __future__ import annotations
 
 import logging
+import time
+from datetime import datetime
 from typing import Optional
 
 from .constants import (
@@ -36,7 +40,6 @@ from .constants import (
     ENTITY_TYPE_ALERT,
     ENTITY_TYPE_INCIDENT,
     INGESTED_ID_CAP,
-    MAX_ALERT_EVENT_FETCHES_PER_CYCLE,
     MAX_ALERTS_PER_CASE,
     SOAR_ALERT_TYPE_ALERT,
     SOAR_ALERT_TYPE_INCIDENT,
@@ -65,11 +68,13 @@ from .mapping import (
 from .utils import (
     compute_time_window,
     parse_backfill_days,
+    parse_iso_timestamp,
     parse_lookback_minutes,
     resolve_alert_filters,
     resolve_entities,
     resolve_incident_filters,
     safe_log,
+    to_iso,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,14 +102,12 @@ class IngestionPipeline:
         incident_verdicts: str = "",
         max_fetch: Optional[int] = None,
         max_alerts_per_case: int = MAX_ALERTS_PER_CASE,
-        max_alert_event_fetches: int = MAX_ALERT_EVENT_FETCHES_PER_CYCLE,
         logger_instance=None,
     ) -> None:
         self.manager = manager
         self.entities = resolve_entities(entities_raw)
         self.max_fetch = max_fetch
         self.max_alerts_per_case = max(1, int(max_alerts_per_case))
-        self.max_alert_event_fetches = max(0, int(max_alert_event_fetches))
         self.lookback_minutes = parse_lookback_minutes(lookback_minutes)
         self.backfill_days = parse_backfill_days(backfill_days)
         self.alert_filters = resolve_alert_filters(
@@ -124,7 +127,9 @@ class IngestionPipeline:
         )
         self.logger = logger_instance or logger
         self._incident_cache: dict[str, dict] = {}
-        self._event_fetches = 0
+        self._incomplete = False
+        self._progress_ts: Optional[datetime] = None
+        self._deadline: Optional[float] = None
 
     def _log(self, level: str, msg: str, *args) -> None:
         safe_log(self.logger, level, msg, *args)
@@ -204,15 +209,43 @@ class IngestionPipeline:
             )
         return record
 
+    def _now(self) -> float:
+        return time.monotonic()
+
+    def _should_stop(self, collected: int) -> bool:
+        if self._remaining(collected) == 0:
+            return True
+        if self._deadline is None or collected <= 0:
+            return False
+        if self._now() < self._deadline:
+            return False
+        if not self._incomplete:
+            self._incomplete = True
+            resume = (
+                to_iso(self._progress_ts) if self._progress_ts else "the current watermark"
+            )
+            self._log(
+                "info",
+                "Stopping ingest before connector timeout so this cycle can "
+                "package cases and save the watermark. Remaining Vega records "
+                "resume next run from %s.",
+                resume,
+            )
+        return True
+
+    def _note_progress(self, record: dict) -> None:
+        parsed = parse_iso_timestamp(record_timestamp(record))
+        if parsed is None:
+            return
+        if self._progress_ts is None or parsed > self._progress_ts:
+            self._progress_ts = parsed
+
+    def _sort_by_timestamp(self, rows: list[dict]) -> list[dict]:
+        return sorted(rows, key=lambda row: record_timestamp(row) or "")
+
     def _enrich_alert(self, record: dict) -> dict:
-        # Child Vega Alert Events live on the Related Vega Alert, not the incident.
-        # Cap per-cycle event fetches so one 800-alert incident cannot 429 Vega
-        # and abort the whole connector run before any case is returned.
+        # Child Vega Alert Events live on the Vega Alert, not the incident.
         record = dict(record)
-        if self._event_fetches >= self.max_alert_event_fetches:
-            if not record.get("alert_events"):
-                record["alert_events"] = []
-            return record
         candidates = record_alert_ids(record)
         if not candidates:
             record.setdefault("alert_events", [])
@@ -231,15 +264,7 @@ class IngestionPipeline:
                 )
                 continue
             used_id = alert_id
-            self._event_fetches += 1
-            if self._event_fetches == self.max_alert_event_fetches:
-                self._log(
-                    "info",
-                    "Reached per-cycle Vega alert-event fetch cap (%s). "
-                    "Remaining related alerts are still packaged without events.",
-                    self.max_alert_event_fetches,
-                )
-            if events or self._event_fetches >= self.max_alert_event_fetches:
+            if events:
                 break
         record["alert_events"] = events
         self._log(
@@ -463,7 +488,7 @@ class IngestionPipeline:
         ingested_set: set[str],
         case_tags: Optional[list[str]] = None,
     ) -> bool:
-        if self._remaining(len(records)) == 0:
+        if self._should_stop(len(records)):
             return False
         identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
         synthetic_key = f"incident:{identifier}"
@@ -486,6 +511,7 @@ class IngestionPipeline:
         )
         records.append((ENTITY_TYPE_INCIDENT, packaged))
         self._mark_ingested(ingested, ingested_set, synthetic_key)
+        self._note_progress(packaged)
         return True
 
     def _append_related_alert(
@@ -499,7 +525,7 @@ class IngestionPipeline:
         case_tags: Optional[list[str]] = None,
         apply_case_tags: bool = False,
     ) -> bool:
-        if self._remaining(len(records)) == 0:
+        if self._should_stop(len(records)):
             return False
         identifier = record_id(alert, ENTITY_TYPE_ALERT)
         if not identifier or identifier in ingested_set:
@@ -522,6 +548,7 @@ class IngestionPipeline:
             packaged = set_soar_meta(packaged, apply_case_tags=True)
         records.append((ENTITY_TYPE_ALERT, packaged))
         self._mark_ingested(ingested, ingested_set, identifier)
+        self._note_progress(packaged)
         return True
 
     def _emit_incident_cases(
@@ -545,7 +572,10 @@ class IngestionPipeline:
             ingested_set,
             case_tags=collect_label_tags(incident),
         )
-        chunks = chunk_case_alerts(related, self.max_alerts_per_case)
+        chunks = chunk_case_alerts(
+            self._sort_by_timestamp(list(related or [])),
+            self.max_alerts_per_case,
+        )
         if chunks:
             self._log(
                 "info",
@@ -557,7 +587,7 @@ class IngestionPipeline:
                 self.max_alerts_per_case,
             )
         for index, chunk in enumerate(chunks, start=1):
-            if self._remaining(len(records)) == 0:
+            if self._should_stop(len(records)):
                 break
             case_tags = collect_label_tags(incident, *chunk)
             for offset, alert in enumerate(chunk):
@@ -571,7 +601,7 @@ class IngestionPipeline:
                     case_tags=case_tags,
                     apply_case_tags=offset == 0,
                 ):
-                    if self._remaining(len(records)) == 0:
+                    if self._should_stop(len(records)):
                         return
 
     def _ingest_incidents(
@@ -584,7 +614,7 @@ class IngestionPipeline:
     ) -> None:
         """Fetch Vega incidents and optionally nest related alerts in the case."""
         remaining = self._remaining(len(records))
-        if remaining == 0:
+        if remaining == 0 or self._should_stop(len(records)):
             return
         try:
             incidents = self.manager.get_incidents(
@@ -593,6 +623,9 @@ class IngestionPipeline:
         except Exception as exc:
             self._log("error", "Unable to fetch Vega incidents: %s", exc)
             return
+        incidents = self._sort_by_timestamp(
+            [item for item in incidents if isinstance(item, dict)]
+        )
         self._log("info", "Fetched %s Vega incident(s).", len(incidents))
         related_index: dict[str, dict] = {}
         if include_related and incidents:
@@ -601,7 +634,7 @@ class IngestionPipeline:
                 all_alert_ids.extend(incident_alert_ids(incident))
             related_index = self._fetch_alerts_by_ids(all_alert_ids, window)
         for incident in incidents:
-            if self._remaining(len(records)) == 0:
+            if self._should_stop(len(records)):
                 break
             identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
             if not identifier:
@@ -629,7 +662,7 @@ class IngestionPipeline:
         ingested: list[str],
         ingested_set: set[str],
     ) -> bool:
-        if self._remaining(len(records)) == 0:
+        if self._should_stop(len(records)):
             return False
         identifier = record_id(alert, ENTITY_TYPE_ALERT)
         if not identifier or identifier in ingested_set:
@@ -645,6 +678,7 @@ class IngestionPipeline:
         )
         records.append((ENTITY_TYPE_ALERT, packaged))
         self._mark_ingested(ingested, ingested_set, identifier)
+        self._note_progress(packaged)
         return True
 
     def _ingest_standalone_alerts(
@@ -658,7 +692,7 @@ class IngestionPipeline:
     ) -> None:
         """One SOAR case per Vega alert (related or unrelated, never nested)."""
         remaining = self._remaining(len(records))
-        if remaining == 0:
+        if remaining == 0 or self._should_stop(len(records)):
             return
         try:
             alerts = self.manager.get_alerts(
@@ -667,10 +701,13 @@ class IngestionPipeline:
         except Exception as exc:
             self._log("error", "Unable to fetch %s Vega alerts: %s", label, exc)
             return
+        alerts = self._sort_by_timestamp(
+            [item for item in alerts if isinstance(item, dict)]
+        )
         self._log("info", "Fetched %s %s Vega alert(s).", len(alerts), label)
         for alert in alerts:
             if not self._append_standalone_alert(alert, records, ingested, ingested_set):
-                if self._remaining(len(records)) == 0:
+                if self._should_stop(len(records)):
                     break
 
     def _ingest_plan(self) -> dict:
@@ -688,7 +725,11 @@ class IngestionPipeline:
             "has_related": has_related,
         }
 
-    def run(self, checkpoint: Optional[dict] = None) -> dict:
+    def run(
+        self,
+        checkpoint: Optional[dict] = None,
+        deadline_monotonic: Optional[float] = None,
+    ) -> dict:
         # 1. Configuration is already on this pipeline (entities, filters, has-related).
         # 2. Time window: first run uses backfill; later runs resume from watermark.
         state = dict(checkpoint or {})
@@ -697,6 +738,10 @@ class IngestionPipeline:
         window = compute_time_window(state, self.backfill_days, self.lookback_minutes)
         records: list[tuple[str, dict]] = []
         plan = self._ingest_plan()
+
+        self._incomplete = False
+        self._progress_ts = None
+        self._deadline = deadline_monotonic
 
         checkpoint_ids = len(ingested_set)
         self._log(
@@ -712,7 +757,6 @@ class IngestionPipeline:
             checkpoint_ids,
         )
 
-        self._event_fetches = 0
         try:
             if plan["fetch_incidents"]:
                 self._ingest_incidents(
@@ -722,16 +766,16 @@ class IngestionPipeline:
                     ingested_set,
                     include_related=plan["nest_related_alerts"],
                 )
-            if plan["standalone_related_alerts"]:
+            if not self._should_stop(len(records)) and plan["standalone_related_alerts"]:
                 self._ingest_standalone_alerts(
                     window, records, ingested, ingested_set, True, "related"
                 )
-            if plan["standalone_unrelated_alerts"]:
+            if not self._should_stop(len(records)) and plan["standalone_unrelated_alerts"]:
                 self._ingest_standalone_alerts(
                     window, records, ingested, ingested_set, False, "unrelated"
                 )
         except Exception as exc:
-            # Keep whatever was already packaged so SOAR still gets cases.
+            self._incomplete = True
             self._log(
                 "error",
                 "Ingest stopped after %s record(s): %s",
@@ -742,12 +786,23 @@ class IngestionPipeline:
         if len(ingested) > INGESTED_ID_CAP:
             ingested = ingested[-INGESTED_ID_CAP:]
         state["ingested_ids"] = ingested
-        state["watermark"] = window["end"]
+        if self._incomplete:
+            if self._progress_ts is not None:
+                state["watermark"] = to_iso(self._progress_ts)
+            state["incomplete"] = True
+            state["query_mode"] = window.get("query_mode") or state.get("query_mode") or "created"
+        else:
+            state["watermark"] = window["end"]
+            state["incomplete"] = False
+            state["query_mode"] = "updated"
         self._log(
             "info",
-            "Ingest complete: emitting %s new record(s) (checkpoint had %s id(s)).",
+            "Ingest complete: emitting %s new record(s) (checkpoint had %s id(s), "
+            "incomplete=%s watermark=%s).",
             len(records),
             checkpoint_ids,
+            self._incomplete,
+            state.get("watermark"),
         )
         if not records:
             self._log(
@@ -761,4 +816,5 @@ class IngestionPipeline:
             "checkpoint": state,
             "fetched": len(records),
             "window": window,
+            "incomplete": self._incomplete,
         }

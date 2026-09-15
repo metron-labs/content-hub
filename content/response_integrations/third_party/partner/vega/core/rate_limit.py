@@ -13,7 +13,7 @@ from .exceptions import VegaRateLimitException
 
 
 class RateLimitController:
-    """Wait 2s, 4s, 6s... on consecutive 429s; reset to 2s after success."""
+    """Wait 2s, 4s, 6s... on consecutive 429s; give up on the 8th; reset after success."""
 
     def __init__(
         self,

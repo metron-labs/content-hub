@@ -196,7 +196,7 @@ def _raise_unsupported(param_name: str, unknown: list[str], allowed: Iterable[st
     possible = ", ".join(allowed)
     if len(unknown) == 1:
         raise VegaValidationException(
-            f"{quoted} is not a valid value for {param_name}. Use one of: {possible}."
+            f"{quoted} is not a valid value for {param_name}. Use one or both of: {possible}."
         )
     raise VegaValidationException(
         f"{quoted} are not valid values for {param_name}. Use only: {possible}."
@@ -485,11 +485,15 @@ def compute_time_window(
 ) -> dict:
     current = now or utc_now()
     lookback = timedelta(minutes=lookback_minutes)
-    watermark = parse_iso_timestamp((checkpoint or {}).get("watermark"))
+    state = checkpoint or {}
+    watermark = parse_iso_timestamp(state.get("watermark"))
+    incomplete = bool(state.get("incomplete"))
+    query_mode = str(state.get("query_mode") or "").strip().lower()
     if watermark is None:
         start = current - timedelta(days=backfill_days) - lookback
         return {
             "first_run": True,
+            "query_mode": "created",
             "from": to_iso(start),
             "to": to_iso(current),
             "updated_from": None,
@@ -497,8 +501,21 @@ def compute_time_window(
             "end": to_iso(current),
         }
     start = watermark - lookback
+    # An unfinished createdAt backfill must not switch to updatedAt or the
+    # remaining older records would be skipped.
+    if incomplete and query_mode == "created":
+        return {
+            "first_run": True,
+            "query_mode": "created",
+            "from": to_iso(start),
+            "to": to_iso(current),
+            "updated_from": None,
+            "updated_to": None,
+            "end": to_iso(current),
+        }
     return {
         "first_run": False,
+        "query_mode": "updated",
         "from": None,
         "to": None,
         "updated_from": to_iso(start),

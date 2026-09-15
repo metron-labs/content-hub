@@ -46,8 +46,8 @@ parameters:
     is_mandatory: true
     is_advanced: false
     mode: script
--   name: Max Days Backwards
-    default_value: '135'
+-   name: Backfill Days
+    default_value: '137'
     type: string
     description: Days to backfill on the first run only. Enter an integer from 0 to
         365 (0 starts from today). Invalid values cause a configuration error.
@@ -146,21 +146,15 @@ parameters:
     type: string
     description: Max seconds for one connector run before SecOps kills the Python
         process. This is not the schedule. Use Run Every to control how often a run
-        starts. Raise this if a full time-window fetch is killed before it finishes.
+        starts. The connector stops before this limit, saves a timestamp watermark,
+        and the next run continues from that point so alert events are not dropped.
     is_mandatory: true
     is_advanced: false
     mode: regular
-description: 'Pull Vega incidents as SOAR cases named Vega Incident - <display
-    id> - <name> (incident alert only). When Alerts and Has Related Incidents=Yes
-    are also selected, related Vega alerts go to separate cases named after the
-    incident with (batch N), up to 90 related alerts each. Related alerts keep
-    their own Name (Vega Alert - id - name). They share Product Vega. Incident
-    and related-alert batches use different Source Grouping Identifiers so they
-    stay separate cases. Add an Alerts Grouping rule for Product Vega, Group By
-    Source Grouping Identifier (same pattern as Wiz_Defend), above All alerts.
-    Without that rule SOAR creates one case per Vega alert. Set Case Name to
-    Rule Generator. Dynamic List is not used. Set Run Every to 5 minutes unless
-    the tenant requires otherwise.'
+description: 'Ingests Vega incidents and alerts as SOAR cases. Incidents become
+    their own cases. Related alerts go into separate grouped cases. Unrelated alerts become one case each. Add an Alerts Grouping
+    rule for Product Vega, Group By Source Grouping Identifier, above All alerts,
+    and set Case Name to Rule Generator.'
 integration: Vega
 documentation_link: https://vega.io/
 rules: []

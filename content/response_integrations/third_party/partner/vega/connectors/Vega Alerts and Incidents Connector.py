@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 
 from soar_sdk.SiemplifyConnectors import SiemplifyConnectorExecution
 from soar_sdk.SiemplifyUtils import output_handler
@@ -50,6 +51,7 @@ def main(is_test_run: bool):
     from ..core.constants import (
         CHECKPOINT_PROPERTY_KEY,
         CONNECTOR_NAME,
+        INGEST_STOP_BUFFER_SECONDS,
         PARAM_ACCESS_KEY,
         PARAM_ACCESS_KEY_ID,
         PARAM_ALERT_SEVERITIES,
@@ -63,13 +65,15 @@ def main(is_test_run: bool):
         PARAM_INCIDENT_STATUSES,
         PARAM_INCIDENT_VERDICTS,
         PARAM_LOOKBACK,
+        PARAM_PYTHON_TIMEOUT,
         PARAM_SYNC,
+        PYTHON_PROCESS_TIMEOUT_DEFAULT,
         REMEDIATION_PROPERTY_KEY,
         TEST_RUN_MAX_FETCH,
     )
     from ..core.IngestionPipeline import IngestionPipeline
     from ..core.Remediator import SoarRemediator
-    from ..core.utils import format_user_facing_error, truthy
+    from ..core.utils import format_user_facing_error, parse_int_in_range, truthy
     from ..core.VegaManager import VegaManager
 
     siemplify.script_name = CONNECTOR_NAME
@@ -124,13 +128,35 @@ def main(is_test_run: bool):
         checkpoint = {} if is_test_run else _read_json(
             siemplify, _connector_id(siemplify), CHECKPOINT_PROPERTY_KEY
         )
+        deadline = None
+        if not is_test_run:
+            try:
+                timeout_seconds = parse_int_in_range(
+                    siemplify.extract_connector_param(
+                        param_name=PARAM_PYTHON_TIMEOUT,
+                        default_value=PYTHON_PROCESS_TIMEOUT_DEFAULT,
+                    ),
+                    PARAM_PYTHON_TIMEOUT,
+                    30,
+                    3600,
+                    default=int(PYTHON_PROCESS_TIMEOUT_DEFAULT),
+                )
+            except Exception:
+                timeout_seconds = int(PYTHON_PROCESS_TIMEOUT_DEFAULT)
+            budget = max(timeout_seconds - INGEST_STOP_BUFFER_SECONDS, 15)
+            deadline = time.monotonic() + budget
         # 3. Fetch/package records, then persist checkpoint and optional close-sync.
-        summary = pipeline.run(checkpoint=checkpoint)
+        summary = pipeline.run(checkpoint=checkpoint, deadline_monotonic=deadline)
         alerts = create_alerts(summary.get("records") or [], siemplify, siemplify.LOGGER)
         siemplify.LOGGER.info(
             f"Fetched {summary.get('fetched') or 0} Vega record(s); "
             f"built {len(alerts)} alert package(s)."
         )
+        if summary.get("incomplete"):
+            siemplify.LOGGER.info(
+                "Cycle stopped early to avoid connector timeout; next run resumes "
+                f"from watermark { (summary.get('checkpoint') or {}).get('watermark') }."
+            )
         if not is_test_run:
             _write_json(
                 siemplify,
@@ -138,7 +164,7 @@ def main(is_test_run: bool):
                 CHECKPOINT_PROPERTY_KEY,
                 summary.get("checkpoint") or {},
             )
-            if truthy(
+            if (not summary.get("incomplete")) and truthy(
                 siemplify.extract_connector_param(
                     param_name=PARAM_SYNC, default_value="true"
                 )

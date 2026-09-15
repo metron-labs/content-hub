@@ -50,15 +50,15 @@ NESTED_RELATED_KEY = "nested_related_alerts"
 MAX_ALERTS_PER_CASE = 90
 SYNC_RESOLVED_STATUS = "RESOLVED"
 ALERT_ID_LOOKUP_BATCH = 10
-# getAlertsEvents is one HTTP call per alert. A large incident (800+ alerts)
-# will 429 / GraphQL-fail if we fetch events for every related alert in one run.
-MAX_ALERT_EVENT_FETCHES_PER_CYCLE = 25
 TIMELINE_PAGE_SIZE = 100
 TIMELINE_MAX_FETCH = 2500
 TEST_RUN_MAX_FETCH = 5
-MAX_CONSECUTIVE_429 = 6
+MAX_CONSECUTIVE_429 = 8
 RATE_LIMIT_INITIAL_WAIT_SECONDS = 2
 RATE_LIMIT_STEP_SECONDS = 2
+# Leave this much time to package cases and write the checkpoint before
+# SecOps kills the connector (PythonProcessTimeout).
+INGEST_STOP_BUFFER_SECONDS = 90
 SERVER_ERROR_RETRIES = 3
 SERVER_ERROR_WAIT_SECONDS = 2
 INGESTED_ID_CAP = 5000
@@ -75,7 +75,7 @@ PARAM_ACCESS_KEY_ID = "Access Key ID"
 PARAM_ACCESS_KEY = "Access Key"
 PARAM_ENTITIES = "Vega Entities to Fetch"
 PARAM_LOOKBACK = "Fetch Lookback (Minutes)"
-PARAM_BACKFILL = "Max Days Backwards"
+PARAM_BACKFILL = "Backfill Days"
 PARAM_ALERT_SEVERITIES = "Alert Severities to Fetch"
 PARAM_ALERT_STATUSES = "Alert Statuses to Fetch"
 PARAM_ALERT_VERDICTS = "Alert Verdicts to Fetch"
@@ -84,6 +84,7 @@ PARAM_INCIDENT_SEVERITIES = "Incident Severities to Fetch"
 PARAM_INCIDENT_STATUSES = "Incident Statuses to Fetch"
 PARAM_INCIDENT_VERDICTS = "Incident Verdicts to Fetch"
 PARAM_SYNC = "Sync Case Close to Vega"
+PARAM_PYTHON_TIMEOUT = "PythonProcessTimeout"
 
 SEVERITY_OPTIONS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 ALERT_STATUS_OPTIONS = ("OPEN", "IN PROGRESS", "PEER REVIEW", "RESOLVED")
