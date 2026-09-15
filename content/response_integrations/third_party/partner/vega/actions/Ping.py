@@ -1,7 +1,48 @@
 from __future__ import annotations
+import sys
+from contextlib import contextmanager
+
 from soar_sdk.SiemplifyAction import SiemplifyAction
 from soar_sdk.SiemplifyUtils import output_handler
 from soar_sdk.ScriptResult import EXECUTION_STATE_COMPLETED, EXECUTION_STATE_FAILED
+
+
+@contextmanager
+def _mute_siemplify_logs(siemplify):
+    logger = getattr(siemplify, "LOGGER", None)
+    if logger is None:
+        yield
+        return
+    names = ("info", "error", "warning", "warn", "debug", "exception")
+    original = {name: getattr(logger, name, None) for name in names}
+
+    def _noop(*_args, **_kwargs):
+        return None
+
+    for name, method in original.items():
+        if callable(method):
+            setattr(logger, name, _noop)
+    try:
+        yield
+    finally:
+        for name, method in original.items():
+            if method is not None:
+                setattr(logger, name, method)
+
+
+def _clear_captured_output(siemplify) -> None:
+    """Test connectivity shows DebugOutput (printed logs), not only end()."""
+    logger = getattr(siemplify, "LOGGER", None)
+    rows = getattr(logger, "_log_rows", None) if logger is not None else None
+    if isinstance(rows, list):
+        rows.clear()
+    stdout = getattr(sys, "stdout", None)
+    if stdout is not None and hasattr(stdout, "truncate") and hasattr(stdout, "seek"):
+        try:
+            stdout.truncate(0)
+            stdout.seek(0)
+        except Exception:
+            pass
 
 
 @output_handler
@@ -21,11 +62,13 @@ def main():
     status = EXECUTION_STATE_COMPLETED
     result_value = True
     try:
+        with _mute_siemplify_logs(siemplify):
+            conf = siemplify.get_configuration(INTEGRATION_NAME) or {}
+        _clear_captured_output(siemplify)
         manager = VegaManager(
-            api_root=siemplify.extract_configuration_param(INTEGRATION_NAME, PARAM_API_ROOT),
-            access_key_id=siemplify.extract_configuration_param(INTEGRATION_NAME, PARAM_ACCESS_KEY_ID),
-            access_key=siemplify.extract_configuration_param(INTEGRATION_NAME, PARAM_ACCESS_KEY),
-            logger_instance=siemplify.LOGGER,
+            api_root=conf.get(PARAM_API_ROOT),
+            access_key_id=conf.get(PARAM_ACCESS_KEY_ID),
+            access_key=conf.get(PARAM_ACCESS_KEY),
         )
         manager.test_connection()
         output_message = f"Successfully connected to the {INTEGRATION_NAME} server!"
@@ -33,11 +76,11 @@ def main():
         result_value = False
         status = EXECUTION_STATE_FAILED
         output_message = format_user_facing_error(error)
+        _clear_captured_output(siemplify)
+    if result_value:
+        siemplify.LOGGER.info(output_message)
+    else:
         siemplify.LOGGER.error(output_message)
-
-    siemplify.LOGGER.info(f"Status: {status}")
-    siemplify.LOGGER.info(f"Result Value: {result_value}")
-    siemplify.LOGGER.info(f"Output Message: {output_message}")
     siemplify.end(output_message, result_value, status)
 
 

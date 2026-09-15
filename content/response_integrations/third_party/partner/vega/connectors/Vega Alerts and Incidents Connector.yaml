@@ -8,19 +8,19 @@ parameters:
     is_mandatory: true
     is_advanced: false
     mode: script
--   name: Access Key ID
-    default_value: ''
-    type: password
-    description: Vega Access Key ID (X-Vega-Key-Id header). Invalid values cause a
-        configuration error.
-    is_mandatory: true
-    is_advanced: false
-    mode: script
 -   name: Access Key
     default_value: ''
     type: password
     description: Vega Access Key used with login_machine. Invalid values cause a configuration
         error.
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Access Key ID
+    default_value: ''
+    type: password
+    description: Vega Access Key ID (X-Vega-Key-Id header). Invalid values cause a
+        configuration error.
     is_mandatory: true
     is_advanced: false
     mode: script
