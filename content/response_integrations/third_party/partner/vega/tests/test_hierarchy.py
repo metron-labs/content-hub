@@ -7,7 +7,6 @@ from core.constants import (
     ENTITY_TYPE_ALERT,
     ENTITY_TYPE_INCIDENT,
     GET_ALERTS_QUERY,
-    GET_ALERTS_QUERY_COMPAT,
     GET_INCIDENTS_QUERY,
     SOAR_ALERT_TYPE_ALERT,
     SOAR_ALERT_TYPE_INCIDENT,
@@ -94,16 +93,17 @@ def test_collect_label_tags_unions_incident_and_alert_labels() -> None:
 
 
 def test_graphql_queries_request_label_name_and_color_only() -> None:
-    for query in (GET_ALERTS_QUERY, GET_ALERTS_QUERY_COMPAT, GET_INCIDENTS_QUERY):
+    for query in (GET_ALERTS_QUERY, GET_INCIDENTS_QUERY):
         assert "labels { name color }" in query
         assert "labels { id" not in query
         assert "categoryId" not in query
         assert "usageCount" not in query
-    assert (
-        "alerts { alertId vegaAlertId name createdAt }"
-        in GET_INCIDENTS_QUERY
-    )
-    assert "alerts { alertId vegaAlertId name createdAt labels" not in GET_INCIDENTS_QUERY
+    assert "sortBy" not in GET_ALERTS_QUERY
+    assert "originType" not in GET_ALERTS_QUERY
+    assert "escalation" in GET_ALERTS_QUERY
+    assert "alerts { alertId name createdAt }" in GET_INCIDENTS_QUERY
+    assert "alerts { alertId vegaAlertId" not in GET_INCIDENTS_QUERY
+    assert "alerts { alertId name createdAt labels" not in GET_INCIDENTS_QUERY
 
 
 def test_stub_to_alert_keeps_nested_labels() -> None:
@@ -402,6 +402,8 @@ _EMPTY_API_KEYS = (
     "vega_timeline",
     "vega_observables",
     "vega_assets",
+    "vega_recommended_action_keys",
+    "vega_reset_password_user",
 )
 
 
@@ -493,6 +495,62 @@ def test_incident_event_maps_get_incidents_fields() -> None:
     assert "vega_entities" not in event
     for key in ("vega_recommended_actions", "vega_investigation_plan", "vega_observables"):
         assert key not in event, key
+    assert "vega_recommended_action_keys" not in event
+    assert "vega_reset_password_user" not in event
+
+
+def test_incident_event_extracts_okta_reset_user_from_recommended_actions() -> None:
+    event = build_event_dict(
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "VINC-1",
+            "name": "Campaign",
+            "recommendedActions": [
+                {
+                    "name": "Block Exfiltration Destination IP",
+                    "actionKey": "block_ip",
+                    "targetParams": {"ip": "178.128.212.209"},
+                },
+                {
+                    "name": "Revoke Compromised User Sessions",
+                    "actionKey": "revoke_user_sessions",
+                    "targetParams": {"user_id": "alakesh.kothar@metronlabs.com"},
+                },
+                {
+                    "name": "Reset Compromised User Password",
+                    "actionKey": "reset_user_password",
+                    "targetParams": {"user_id": "alakesh.kothar@metronlabs.com"},
+                },
+            ],
+        },
+        ENTITY_TYPE_INCIDENT,
+        1,
+        1,
+    )
+    assert event["vega_recommended_action_keys"] == (
+        "block_ip,revoke_user_sessions,reset_user_password"
+    )
+    assert event["vega_reset_password_user"] == "alakesh.kothar@metronlabs.com"
+    assert event["user"] == "alakesh.kothar@metronlabs.com"
+    assert "reset_user_password" in event["recommended_actions"]
+
+
+def test_reset_password_users_from_payload_reads_recommended_actions_json() -> None:
+    from core.mapping import reset_password_users_from_payload
+
+    users = reset_password_users_from_payload(
+        {
+            "recommended_actions": json.dumps(
+                [
+                    {
+                        "actionKey": "reset_user_password",
+                        "targetParams": {"user_id": "alakesh.kothar@metronlabs.com"},
+                    }
+                ]
+            )
+        }
+    )
+    assert users == ["alakesh.kothar@metronlabs.com"]
 
 
 def test_child_events_stay_scoped_to_parent_alert() -> None:

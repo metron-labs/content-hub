@@ -47,7 +47,7 @@ parameters:
     is_advanced: false
     mode: script
 -   name: Backfill Days
-    default_value: '137'
+    default_value: '365'
     type: string
     description: Days to backfill on the first run only. Enter an integer from 0 to
         365 (0 starts from today). Invalid values cause a configuration error.
@@ -63,7 +63,7 @@ parameters:
     is_advanced: true
     mode: script
 -   name: Alert Statuses to Fetch
-    default_value: OPEN,IN PROGRESS,PEER REVIEW,RESOLVED
+    default_value: IN PROGRESS
     type: string
     description: 'Possible Values: OPEN, IN PROGRESS, PEER REVIEW, RESOLVED. Empty
         = all. Unsupported values cause a configuration error.'
@@ -109,7 +109,7 @@ parameters:
     is_advanced: true
     mode: script
 -   name: Incident Verdicts to Fetch
-    default_value: MALICIOUS,SUSPICIOUS,BENIGN,INCONCLUSIVE,NA
+    default_value: INCONCLUSIVE
     type: string
     description: 'Possible Values: MALICIOUS, SUSPICIOUS, BENIGN, INCONCLUSIVE, NA.
         Empty = all. Unsupported values cause a configuration error.'
@@ -120,10 +120,12 @@ parameters:
     default_value: 'true'
     type: boolean
     description: When true, closing a SOAR case sets Vega status to RESOLVED on the
-        next connector run. The first run after enable only sets a baseline and
-        does not send historical closes. An incident-only case resolves that Vega
-        incident. A related-alert batch or unrelated alert case resolves those Vega
-        alerts. Closing related-alert batches does not resolve the Vega incident.
+        next connector run. Only cases that are actually closed in SecOps are
+        synced. Creating or updating a case during ingest does not resolve Vega.
+        The first run after enable only sets a baseline and does not send
+        historical closes. An incident-only case resolves that Vega incident. A
+        related-alert batch or unrelated alert case resolves those Vega alerts.
+        Closing related-alert batches does not resolve the Vega incident.
     is_mandatory: false
     is_advanced: true
     mode: script

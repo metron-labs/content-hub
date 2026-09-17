@@ -43,6 +43,7 @@ from .constants import (
     MAX_ALERTS_PER_CASE,
     SOAR_ALERT_TYPE_ALERT,
     SOAR_ALERT_TYPE_INCIDENT,
+    TEST_RUN_MAX_FETCH,
 )
 from .mapping import (
     alert_grouping_id,
@@ -264,8 +265,7 @@ class IngestionPipeline:
                 )
                 continue
             used_id = alert_id
-            if events:
-                break
+            break
         record["alert_events"] = events
         self._log(
             "info",
@@ -366,15 +366,9 @@ class IngestionPipeline:
             return found
 
         _lookup_batches(graphql_ids, use_alert_ids=True)
-        missing_graphql = [item for item in graphql_ids if item not in _found_ids()]
-        if missing_graphql:
-            _lookup_batches(missing_graphql, use_alert_ids=False)
         pending_vega = [item for item in vega_ids if item not in _found_ids()]
         if pending_vega:
             _lookup_batches(pending_vega, use_alert_ids=False)
-        missing_vega = [item for item in vega_ids if item not in _found_ids()]
-        if missing_vega:
-            _lookup_batches(missing_vega, use_alert_ids=True)
 
         if not collected:
             self._log(
@@ -604,6 +598,24 @@ class IngestionPipeline:
                     if self._should_stop(len(records)):
                         return
 
+    def _incident_ingested_key(self, incident: dict) -> str:
+        identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
+        return f"incident:{identifier}" if identifier else ""
+
+    def _new_related_alert_ids(self, incident: dict, ingested_set: set[str]) -> list[str]:
+        """Alert IDs from this incident that are not already in the checkpoint."""
+        ids: list[str] = []
+        seen: set[str] = set()
+        for stub in incident_alert_stubs(incident):
+            keys = record_alert_ids(stub)
+            if any(key in ingested_set for key in keys):
+                continue
+            for key in keys:
+                if key not in seen:
+                    seen.add(key)
+                    ids.append(key)
+        return ids
+
     def _ingest_incidents(
         self,
         window: dict,
@@ -631,7 +643,7 @@ class IngestionPipeline:
         if include_related and incidents:
             all_alert_ids: list[str] = []
             for incident in incidents:
-                all_alert_ids.extend(incident_alert_ids(incident))
+                all_alert_ids.extend(self._new_related_alert_ids(incident, ingested_set))
             related_index = self._fetch_alerts_by_ids(all_alert_ids, window)
         for incident in incidents:
             if self._should_stop(len(records)):
@@ -639,7 +651,16 @@ class IngestionPipeline:
             identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
             if not identifier:
                 continue
-            incident = self._enrich_incident(incident)
+            already_ingested = self._incident_ingested_key(incident) in ingested_set
+            pending_related = (
+                self._new_related_alert_ids(incident, ingested_set)
+                if include_related
+                else []
+            )
+            if already_ingested and not pending_related:
+                continue
+            if not already_ingested:
+                incident = self._enrich_incident(incident)
             self._cache_incident(incident)
             related = (
                 self._resolve_related_alerts(incident, related_index)
@@ -723,6 +744,156 @@ class IngestionPipeline:
             "standalone_related_alerts": fetch_alerts and not fetch_incidents and want_related,
             "standalone_unrelated_alerts": fetch_alerts and want_unrelated,
             "has_related": has_related,
+        }
+
+    def _append_sample_incidents(
+        self,
+        window: dict,
+        records: list[tuple[str, dict]],
+        remaining: int,
+        incidents: Optional[list[dict]] = None,
+    ) -> int:
+        if remaining <= 0:
+            return 0
+        if incidents is None:
+            incidents = self.manager.get_incidents(
+                self._incident_variables(window), remaining
+            )
+        added = 0
+        for incident in incidents:
+            if added >= remaining:
+                break
+            if not isinstance(incident, dict):
+                continue
+            identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
+            if not identifier:
+                continue
+            display_id = record_display_id(incident, ENTITY_TYPE_INCIDENT)
+            packaged = set_soar_meta(
+                incident,
+                soar_alert_type=SOAR_ALERT_TYPE_INCIDENT,
+                grouping_id=incident_grouping_id(identifier),
+                case_tags=collect_label_tags(incident),
+                case_title=incident_case_title(incident),
+                grouping_time=record_timestamp(incident),
+                incident_id=identifier,
+                incident_display_id=display_id,
+                incident_name=record_name(incident),
+                is_incident_case=True,
+                is_related_batch=False,
+                case_part=0,
+            )
+            records.append((ENTITY_TYPE_INCIDENT, packaged))
+            added += 1
+        return added
+
+    def _append_sample_alerts(
+        self,
+        window: dict,
+        records: list[tuple[str, dict]],
+        remaining: int,
+        has_related: bool,
+    ) -> int:
+        if remaining <= 0:
+            return 0
+        alerts = self.manager.get_alerts(
+            self._alert_variables(window, has_related), remaining
+        )
+        added = 0
+        for alert in alerts:
+            if added >= remaining:
+                break
+            if not isinstance(alert, dict):
+                continue
+            identifier = record_id(alert, ENTITY_TYPE_ALERT)
+            if not identifier:
+                continue
+            packaged = set_soar_meta(
+                alert,
+                soar_alert_type=SOAR_ALERT_TYPE_ALERT,
+                grouping_id=alert_grouping_id(identifier),
+                case_tags=collect_label_tags(alert),
+                case_title=case_display_name(alert, ENTITY_TYPE_ALERT),
+                incident_id="",
+                is_incident_case=False,
+            )
+            records.append((ENTITY_TYPE_ALERT, packaged))
+            added += 1
+        return added
+
+    def _related_alert_count(self, incidents: list[dict]) -> int:
+        """Count unique nested alerts on incidents (not getAlerts time-window).
+
+        Related Vega alerts are often older than the ingest window, so
+        getAlerts(hasRelatedIncidents=true) in that window returns 0.
+        """
+        seen: set[str] = set()
+        alerts_count_sum = 0
+        for incident in incidents:
+            for alert_id in incident_alert_ids(incident):
+                seen.add(alert_id)
+            raw = incident.get("alertsCount")
+            try:
+                alerts_count_sum += max(int(raw or 0), 0)
+            except (TypeError, ValueError):
+                pass
+        return len(seen) if seen else alerts_count_sum
+
+    def preview(self, sample_limit: int = TEST_RUN_MAX_FETCH) -> dict:
+        """Count matching Vega records and return sample packages without ingest.
+
+        Does not fetch timelines or alert events, and does not write a checkpoint.
+        Counts follow Vega Entities to Fetch and Has Related Incidents.
+        """
+        window = compute_time_window({}, self.backfill_days, self.lookback_minutes)
+        plan = self._ingest_plan()
+        include_incidents = bool(plan["fetch_incidents"])
+        include_related = bool(
+            plan["nest_related_alerts"] or plan["standalone_related_alerts"]
+        )
+        include_unrelated = bool(plan["standalone_unrelated_alerts"])
+        incident_count = 0
+        related_count = 0
+        unrelated_count = 0
+        incidents: list[dict] = []
+        if include_incidents:
+            incidents = [
+                item
+                for item in self.manager.get_incidents(self._incident_variables(window))
+                if isinstance(item, dict)
+            ]
+            incident_count = len(incidents)
+        if include_related:
+            if include_incidents:
+                related_count = self._related_alert_count(incidents)
+            else:
+                related_count = self.manager.count_alerts(
+                    self._alert_variables(self._id_lookup_window(window), True)
+                )
+        if include_unrelated:
+            unrelated_count = self.manager.count_alerts(
+                self._alert_variables(window, False)
+            )
+        remaining = max(1, int(sample_limit))
+        records: list[tuple[str, dict]] = []
+        if include_incidents:
+            remaining -= self._append_sample_incidents(
+                window, records, remaining, incidents=incidents
+            )
+        if remaining and include_related:
+            remaining -= self._append_sample_alerts(window, records, remaining, True)
+        if remaining and include_unrelated:
+            self._append_sample_alerts(window, records, remaining, False)
+        return {
+            "incident_count": incident_count,
+            "related_alert_count": related_count,
+            "unrelated_alert_count": unrelated_count,
+            "total_alert_count": related_count + unrelated_count,
+            "include_incidents": include_incidents,
+            "include_related": include_related,
+            "include_unrelated": include_unrelated,
+            "records": records,
+            "window": window,
         }
 
     def run(

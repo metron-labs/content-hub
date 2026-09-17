@@ -10,17 +10,15 @@ import logging
 from typing import Any, Optional
 
 from .constants import (
-    ALERT_EVENTS_MAX_FETCH,
     ALERT_EVENTS_PAGE_SIZE,
     DEFAULT_HTTP_TIMEOUT,
     GET_ALERT_EVENTS_QUERY,
     GET_ALERTS_QUERY,
-    GET_ALERTS_QUERY_COMPAT,
     GET_INCIDENT_TIMELINE_QUERY,
     GET_INCIDENTS_QUERY,
-    GET_INCIDENTS_QUERY_COMPAT,
     GRAPHQL_PAGE_SIZE,
     LOGIN_PATH,
+    MAX_EVENTS_PER_ALERT,
     MSG_BAD_REQUEST,
     MSG_FORBIDDEN,
     MSG_INVALID_ACCESS_KEY,
@@ -175,8 +173,6 @@ class VegaManager:
         )
         self._sleeper = sleeper or __import__("time").sleep
         self._jwt: Optional[str] = None
-        self._alerts_query = GET_ALERTS_QUERY
-        self._incidents_query = GET_INCIDENTS_QUERY
 
     def _log(self, level: str, msg: str, *args) -> None:
         safe_log(self.logger, level, msg, *args)
@@ -347,12 +343,63 @@ class VegaManager:
 
     def test_connection(self) -> bool:
         """Validate API Root, Access Key, and Access Key ID before ingest."""
-        self.login()
         try:
             self.get_alerts({"limit": 1, "offset": 0}, max_records=1)
         except VegaBadRequestException as exc:
             raise VegaUnauthorizedException(MSG_INVALID_ACCESS_KEY_ID) from exc
         return True
+
+    def _count_records(
+        self,
+        query: str,
+        envelope_key: str,
+        records_key: str,
+        variables: dict,
+    ) -> int:
+        """Return GraphQL `total` without paging the full result set."""
+        page_vars = dict(variables or {})
+        page_vars["limit"] = 1
+        page_vars["offset"] = 0
+        while True:
+            data = self.graphql(query, page_vars)
+            envelope = data.get(envelope_key) or {}
+            if not isinstance(envelope, dict):
+                envelope = {}
+            error = envelope.get("error") or envelope.get("errors") or {}
+            message = None
+            if isinstance(error, dict) and (error.get("code") or error.get("message")):
+                message = error.get("message") or "Vega query failed."
+            elif isinstance(error, list) and error:
+                first = error[0]
+                message = (
+                    first.get("message") if isinstance(first, dict) else str(first)
+                )
+            if message:
+                if is_rate_limit_message(message):
+                    self._wait_rate_limit("GraphQL")
+                    continue
+                classified = classify_credential_error(message)
+                if classified:
+                    raise VegaUnauthorizedException(classified)
+                raise VegaException(str(message).strip() or "Vega query failed.")
+            total = envelope.get("total")
+            if total is not None:
+                try:
+                    return max(int(total), 0)
+                except (TypeError, ValueError):
+                    pass
+            records = envelope.get(records_key) or []
+            return len(records) if isinstance(records, list) else 0
+
+    def count_alerts(self, variables: dict) -> int:
+        return self._count_records(
+            GET_ALERTS_QUERY, "getAlerts", "alerts", variables
+        )
+
+    def count_incidents(self, variables: dict) -> int:
+        return self._count_records(
+            GET_INCIDENTS_QUERY, "getIncidents", "incidents", variables
+        )
 
     def _paged(
         self,
@@ -411,53 +458,15 @@ class VegaManager:
         return collected
 
     def get_alerts(self, variables: dict, max_records: Optional[int] = None) -> list:
-        """Page getAlerts. Pass alertIds to resolve incident-related alerts.
-
-        The full query is tried first. If Vega rejects it (unknown field/type),
-        later calls use the compatible query so ingest can still create cases.
-        Rate-limit errors wait and retry inside graphql(); they must not switch
-        the query to the compatible variant.
-        """
-        try:
-            return self._paged(
-                self._alerts_query, "getAlerts", "alerts", variables, max_records
-            )
-        except VegaException as query_error:
-            if (
-                isinstance(query_error, VegaRateLimitException)
-                or self._alerts_query is GET_ALERTS_QUERY_COMPAT
-            ):
-                raise
-            self._log(
-                "warning",
-                "Full getAlerts query failed (%s); retrying with compatible query.",
-                query_error,
-            )
-            self._alerts_query = GET_ALERTS_QUERY_COMPAT
-            return self._paged(
-                self._alerts_query, "getAlerts", "alerts", variables, max_records
-            )
+        """Page getAlerts. Pass alertIds to resolve incident-related alerts."""
+        return self._paged(
+            GET_ALERTS_QUERY, "getAlerts", "alerts", variables, max_records
+        )
 
     def get_incidents(self, variables: dict, max_records: Optional[int] = None) -> list:
-        try:
-            return self._paged(
-                self._incidents_query, "getIncidents", "incidents", variables, max_records
-            )
-        except VegaException as query_error:
-            if (
-                isinstance(query_error, VegaRateLimitException)
-                or self._incidents_query is GET_INCIDENTS_QUERY_COMPAT
-            ):
-                raise
-            self._log(
-                "warning",
-                "Full getIncidents query failed (%s); retrying without nested vegaAlertId.",
-                query_error,
-            )
-            self._incidents_query = GET_INCIDENTS_QUERY_COMPAT
-            return self._paged(
-                self._incidents_query, "getIncidents", "incidents", variables, max_records
-            )
+        return self._paged(
+            GET_INCIDENTS_QUERY, "getIncidents", "incidents", variables, max_records
+        )
 
     def get_alert_events(
         self, alert_id: str, limit: int = ALERT_EVENTS_PAGE_SIZE, offset: int = 0
@@ -545,6 +554,7 @@ class VegaManager:
         self,
         alert_id: str,
         page_size: int = ALERT_EVENTS_PAGE_SIZE,
+        max_records: int = MAX_EVENTS_PER_ALERT,
     ) -> list:
         from .mapping import normalize_alert_event
 
@@ -552,7 +562,7 @@ class VegaManager:
             lambda limit, offset: self.get_alert_events(alert_id, limit, offset),
             "results",
             page_size,
-            ALERT_EVENTS_MAX_FETCH,
+            max_records,
             f"alert events for {alert_id}",
         )
         return [normalize_alert_event(item) for item in collected]
@@ -595,29 +605,14 @@ class VegaManager:
         )
 
     def get_incident(self, incident_id: str) -> dict:
+        from .mapping import is_graphql_alert_id
+
         lookup = str(incident_id).strip()
-        records = self.get_incidents(
-            {
-                "incidentIds": [lookup],
-                "from": None,
-                "to": None,
-                "updatedFrom": None,
-                "updatedTo": None,
-            },
-            max_records=1,
-        )
-        if records:
-            return records[0]
-        records = self.get_incidents(
-            {
-                "vegaIncidentIds": [lookup],
-                "from": None,
-                "to": None,
-                "updatedFrom": None,
-                "updatedTo": None,
-            },
-            max_records=1,
-        )
+        if is_graphql_alert_id(lookup):
+            variables = {"incidentIds": [lookup]}
+        else:
+            variables = {"vegaIncidentIds": [lookup]}
+        records = self.get_incidents(variables, max_records=1)
         return records[0] if records else {}
 
 

@@ -53,6 +53,8 @@ _SKIP_PAYLOAD_KEYS = {
     "vega_labels",
     "vega_incident_label_names",
 }
+RESET_USER_PASSWORD_ACTION_KEY = "reset_user_password"
+
 _ENTITY_ALIASES = {
     "src_ip": "ip",
     "srcip": "ip",
@@ -166,8 +168,8 @@ def case_display_name(record: dict, entity_type: str) -> str:
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} TEST 70"
-    return f"Vega {entity_type} - {name} TEST 70"
+        return f"Vega {entity_type} - {display_id} - {name} TEST 90"
+    return f"Vega {entity_type} - {name} TEST 90"
 
 
 def incident_case_title(record: dict, related_batch: int = 0) -> str:
@@ -779,6 +781,7 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
     if details:
         event["details"] = details
     event.update(_flatten_entities(record))
+    _apply_recommended_action_fields(event, record)
     return event
 
 
@@ -792,6 +795,101 @@ def _try_parse_json(value: Any) -> Any:
         return json.loads(text)
     except Exception:
         return value
+
+
+def _recommended_action_items(record: dict) -> list[dict]:
+    raw = record.get("recommendedActions")
+    if raw is None:
+        raw = record.get("recommended_actions")
+    parsed = _try_parse_json(raw)
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    items: list[dict] = []
+    for item in parsed:
+        item = _try_parse_json(item)
+        if isinstance(item, dict):
+            items.append(item)
+    return items
+
+
+def _recommended_action_key(item: dict) -> str:
+    return str(item.get("actionKey") or item.get("action_key") or "").strip()
+
+
+def _recommended_action_params(item: dict) -> dict:
+    params = _try_parse_json(item.get("targetParams") or item.get("target_params") or {})
+    return params if isinstance(params, dict) else {}
+
+
+def _recommended_action_user(item: dict) -> str:
+    params = _recommended_action_params(item)
+    return str(
+        params.get("user_id")
+        or params.get("userId")
+        or params.get("email")
+        or params.get("username")
+        or ""
+    ).strip()
+
+
+def _merge_csv_values(event: dict, key: str, values: list[str]) -> None:
+    existing = [
+        item.strip()
+        for item in str(event.get(key) or "").split(",")
+        if item.strip()
+    ]
+    for value in values:
+        if value and value not in existing:
+            existing.append(value)
+    if existing:
+        event[key] = ",".join(existing)
+
+
+def reset_password_users_from_payload(payload: dict) -> list[str]:
+    """User emails/logins from mapped fields or reset_user_password actions."""
+    users: list[str] = []
+
+    def _add(value: Any) -> None:
+        for part in str(value or "").split(","):
+            text = part.strip()
+            if text and text not in users:
+                users.append(text)
+
+    if not isinstance(payload, dict):
+        return users
+    _add(payload.get("vega_reset_password_user"))
+    records = [payload]
+    details = _try_parse_json(payload.get("details"))
+    if isinstance(details, dict):
+        records.append(details)
+    for record in records:
+        for item in _recommended_action_items(record):
+            if _recommended_action_key(item) != RESET_USER_PASSWORD_ACTION_KEY:
+                continue
+            _add(_recommended_action_user(item))
+    return users
+
+
+def _apply_recommended_action_fields(event: dict, record: dict) -> None:
+    """Expose recommended-action keys and Okta reset target on the SOAR event.
+
+    Playbooks can trigger on `vega_recommended_action_keys` / `recommended_actions`
+    and read `vega_reset_password_user` instead of hardcoded emails.
+    """
+    keys: list[str] = []
+    for item in _recommended_action_items(record):
+        key = _recommended_action_key(item)
+        if key and key not in keys:
+            keys.append(key)
+    if keys:
+        event["vega_recommended_action_keys"] = ",".join(keys)
+    reset_users = reset_password_users_from_payload(record)
+    if not reset_users:
+        return
+    event["vega_reset_password_user"] = ",".join(reset_users)
+    _merge_csv_values(event, "user", reset_users)
 
 
 def normalize_alert_event(vega_event: Any) -> dict:

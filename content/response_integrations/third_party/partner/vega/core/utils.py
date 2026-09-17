@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
+import string
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 from urllib.parse import urlparse
@@ -36,6 +38,9 @@ from .constants import (
     PARAM_INCIDENT_STATUSES,
     PARAM_INCIDENT_VERDICTS,
     PARAM_LOOKBACK,
+    PARAM_PYTHON_TIMEOUT,
+    PYTHON_TIMEOUT_MAX,
+    PYTHON_TIMEOUT_MIN,
     RELATED_OPTIONS,
     SEVERITY_OPTIONS,
     VERDICT_OPTIONS,
@@ -196,10 +201,10 @@ def _raise_unsupported(param_name: str, unknown: list[str], allowed: Iterable[st
     possible = ", ".join(allowed)
     if len(unknown) == 1:
         raise VegaValidationException(
-            f"{quoted} is not a valid value for {param_name}. Use one or both of: {possible}."
+            f'{quoted} is not a valid value for {param_name}. Possible values: {possible}.'
         )
     raise VegaValidationException(
-        f"{quoted} are not valid values for {param_name}. Use only: {possible}."
+        f"{quoted} are not valid values for {param_name}. Possible values: {possible}."
     )
 
 
@@ -421,6 +426,153 @@ def format_user_facing_error(exc: BaseException) -> str:
     return cleaned or "Unexpected error while talking to Vega. Check configuration."
 
 
+def format_connector_field_errors(errors: list[str]) -> str:
+    """Friendly message that names each invalid connector field."""
+    cleaned = [str(item).strip() for item in errors if str(item).strip()]
+    if not cleaned:
+        return (
+            "Cannot run the Vega Alerts and Incidents Connector. "
+            "Check the connector fields and try again."
+        )
+    if len(cleaned) == 1:
+        return f"Cannot run the Vega Alerts and Incidents Connector. {cleaned[0]}"
+    bullets = "\n".join(f"- {item}" for item in cleaned)
+    return (
+        "Cannot run the Vega Alerts and Incidents Connector because some fields "
+        f"are invalid:\n{bullets}"
+    )
+
+
+def format_test_connection_summary(
+    incident_count: int,
+    related_alert_count: int,
+    unrelated_alert_count: int,
+    total_alert_count: int,
+    sample_count: int = 0,
+    include_incidents: bool = True,
+    include_related: bool = True,
+    include_unrelated: bool = True,
+) -> str:
+    """Clean test-connection output shown with sample alerts.
+
+    Count lines follow Vega Entities to Fetch and Has Related Incidents, so a
+    Yes-only connector does not report unrelated alerts.
+    """
+    lines = ["Successfully connected to Vega.", "", "What this connector currently sees:"]
+    if include_incidents:
+        lines.append(f"- Vega incidents: {incident_count}")
+    if include_related:
+        lines.append(f"- Vega related alerts: {related_alert_count}")
+    if include_unrelated:
+        lines.append(f"- Vega unrelated alerts: {unrelated_alert_count}")
+    if include_related or include_unrelated:
+        lines.append(f"- Total Vega alerts: {total_alert_count}")
+    sample_line = (
+        f"Showing {sample_count} sample alert(s) below. Nothing was ingested."
+        if sample_count
+        else (
+            "No sample alerts were found for the current filters and time window. "
+            "Nothing was ingested."
+        )
+    )
+    lines.extend(["", sample_line])
+    return "\n".join(lines)
+
+
+def validate_connector_fields(
+    *,
+    api_root: Any,
+    access_key_id: Any,
+    access_key: Any,
+    entities_raw: Any,
+    lookback_minutes: Any,
+    backfill_days: Any,
+    alert_severities: Any = "",
+    alert_statuses: Any = "",
+    alert_verdicts: Any = "",
+    has_related: Any = "Yes,No",
+    incident_severities: Any = "",
+    incident_statuses: Any = "",
+    incident_verdicts: Any = "",
+    python_timeout: Any = None,
+) -> None:
+    """Validate every connector field before login or ingest.
+
+    Collects all field problems so the test-connection output and connector
+    logs can name each invalid field and what is wrong with it.
+    """
+    errors: list[str] = []
+
+    def _check(callback) -> None:
+        try:
+            callback()
+        except VegaValidationException as exc:
+            text = str(exc).strip()
+            if text and text not in errors:
+                errors.append(text)
+
+    _check(lambda: normalize_api_root(api_root))
+    _check(lambda: require_secret(access_key_id, "Access Key ID"))
+    _check(lambda: require_secret(access_key, "Access Key"))
+    _check(lambda: resolve_entities(entities_raw))
+    _check(lambda: parse_lookback_minutes(lookback_minutes))
+    _check(lambda: parse_backfill_days(backfill_days))
+    _check(
+        lambda: resolve_multi_filter(
+            alert_severities,
+            SEVERITY_OPTIONS,
+            param_name=PARAM_ALERT_SEVERITIES,
+        )
+    )
+    _check(
+        lambda: resolve_multi_filter(
+            alert_statuses,
+            ALERT_STATUS_OPTIONS,
+            param_name=PARAM_ALERT_STATUSES,
+        )
+    )
+    _check(
+        lambda: resolve_multi_filter(
+            alert_verdicts,
+            VERDICT_OPTIONS,
+            param_name=PARAM_ALERT_VERDICTS,
+        )
+    )
+    _check(lambda: resolve_has_related(has_related))
+    _check(
+        lambda: resolve_multi_filter(
+            incident_severities,
+            SEVERITY_OPTIONS,
+            param_name=PARAM_INCIDENT_SEVERITIES,
+        )
+    )
+    _check(
+        lambda: resolve_multi_filter(
+            incident_statuses,
+            INCIDENT_STATUS_OPTIONS,
+            param_name=PARAM_INCIDENT_STATUSES,
+        )
+    )
+    _check(
+        lambda: resolve_multi_filter(
+            incident_verdicts,
+            VERDICT_OPTIONS,
+            param_name=PARAM_INCIDENT_VERDICTS,
+        )
+    )
+    if python_timeout is not None:
+        _check(
+            lambda: parse_int_in_range(
+                python_timeout,
+                PARAM_PYTHON_TIMEOUT,
+                PYTHON_TIMEOUT_MIN,
+                PYTHON_TIMEOUT_MAX,
+            )
+        )
+    if errors:
+        raise VegaValidationException(format_connector_field_errors(errors))
+
+
 def safe_log(logger_obj, level: str, msg: str, *args) -> None:
     text = msg
     if args:
@@ -522,3 +674,26 @@ def compute_time_window(
         "updated_to": to_iso(current),
         "end": to_iso(current),
     }
+
+
+def generate_random_password(length: int = 16) -> str:
+    """Return a random password that meets typical Okta complexity rules.
+
+    The alphabet omits quotes, backslashes, and brackets so the value can be
+    dropped into playbook JSON and email bodies without extra escaping.
+    """
+    from .constants import MIN_PASSWORD_LENGTH, PASSWORD_SYMBOLS
+
+    if length < MIN_PASSWORD_LENGTH:
+        raise ValueError(
+            f"Password length must be at least {MIN_PASSWORD_LENGTH} characters."
+        )
+    lower = string.ascii_lowercase
+    upper = string.ascii_uppercase
+    digits = string.digits
+    pools = (lower, upper, digits, PASSWORD_SYMBOLS)
+    alphabet = "".join(pools)
+    chars = [secrets.choice(pool) for pool in pools]
+    chars.extend(secrets.choice(alphabet) for _ in range(length - len(pools)))
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)

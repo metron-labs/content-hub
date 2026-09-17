@@ -1,3 +1,16 @@
+-   description: Add Add Case Comment so playbooks can comment without Siemplify
+        Case Comment fallback-instance failures.
+    version: 2.2
+    item_name: Vega
+    item_type: Integration
+    publish_time: '2026-09-17'
+    ticket_number: No ticket
+-   description: Add Generate Random Password for Okta Set Password playbooks.
+    version: 2.1
+    item_name: Vega
+    item_type: Integration
+    publish_time: '2026-09-17'
+    ticket_number: No ticket
 -   description: Map Vega incidents to SOAR cases named Vega Incident - id - name
         that include a Vega Incident alert plus related Vega Alert alerts (split
         across cases when over the 90-alert cap), keep Alert Type as Vega Incident

@@ -20,6 +20,8 @@ class FakeManager:
         self.incident_by_id: dict[str, dict] = {}
         self.alert_calls: list[dict] = []
         self.incident_calls: list[dict] = []
+        self.event_calls: list[str] = []
+        self.timeline_calls: list[str] = []
 
     def get_incidents(self, variables, max_records=None):
         self.incident_calls.append(dict(variables or {}))
@@ -57,10 +59,18 @@ class FakeManager:
             return rows[:max_records]
         return rows
 
-    def get_all_alert_events(self, alert_id):
+    def count_alerts(self, variables):
+        return len(self.get_alerts(variables))
+
+    def count_incidents(self, variables):
+        return len(self.get_incidents(variables))
+
+    def get_all_alert_events(self, alert_id, page_size=None, max_records=None):
+        self.event_calls.append(alert_id)
         return list(self.alert_events.get(alert_id) or [])
 
     def get_all_incident_timeline(self, incident_id):
+        self.timeline_calls.append(incident_id)
         return list(self.timelines.get(incident_id) or [])
 
     def get_incident(self, incident_id):
@@ -813,6 +823,7 @@ def test_timeout_saves_watermark_and_next_run_continues() -> None:
     assert first["checkpoint"]["watermark"] == "2026-01-01T00:00:00Z"
     assert first["checkpoint"]["incomplete"] is True
     assert first["checkpoint"]["query_mode"] == "created"
+    assert manager.timeline_calls == ["inc-1"]
 
     second = _pipeline(
         manager, entities="Alerts,Incidents", has_related="Yes", max_fetch=20
@@ -824,6 +835,7 @@ def test_timeout_saves_watermark_and_next_run_continues() -> None:
         "e2",
     ]
     assert second["incomplete"] is False
+    assert manager.timeline_calls == ["inc-1"]
 
 
 def test_incomplete_created_window_keeps_createdat_filters() -> None:
@@ -845,3 +857,97 @@ def test_incomplete_created_window_keeps_createdat_filters() -> None:
     assert window["query_mode"] == "created"
     assert window["from"] is not None
     assert window["updated_from"] is None
+
+
+def test_preview_counts_and_samples_without_enrichment() -> None:
+    manager = _sample_manager()
+    preview = _pipeline(manager, max_fetch=5).preview(sample_limit=5)
+    assert preview["incident_count"] == 1
+    assert preview["related_alert_count"] == 2
+    assert preview["unrelated_alert_count"] == 1
+    assert preview["total_alert_count"] == 3
+    assert preview["include_incidents"] is True
+    assert preview["include_related"] is True
+    assert preview["include_unrelated"] is True
+    kinds = [kind for kind, _ in preview["records"]]
+    assert ENTITY_TYPE_INCIDENT in kinds
+    assert ENTITY_TYPE_ALERT in kinds
+    assert manager.event_calls == []
+    assert manager.timeline_calls == []
+    assert all("alert_events" not in record for _, record in preview["records"])
+    assert all("timeline" not in record for _, record in preview["records"])
+
+
+def test_preview_samples_follow_entity_selection() -> None:
+    manager = _sample_manager()
+    preview = _pipeline(
+        manager, entities="Incidents", has_related="Yes,No", max_fetch=5
+    ).preview(sample_limit=5)
+    assert preview["incident_count"] == 1
+    assert preview["related_alert_count"] == 0
+    assert preview["unrelated_alert_count"] == 0
+    assert preview["total_alert_count"] == 0
+    assert preview["include_incidents"] is True
+    assert preview["include_related"] is False
+    assert preview["include_unrelated"] is False
+    assert [kind for kind, _ in preview["records"]] == [ENTITY_TYPE_INCIDENT]
+
+
+def test_preview_yes_only_omits_unrelated_counts() -> None:
+    manager = _sample_manager()
+    preview = _pipeline(
+        manager, entities="Alerts,Incidents", has_related="Yes", max_fetch=5
+    ).preview(sample_limit=5)
+    assert preview["include_related"] is True
+    assert preview["include_unrelated"] is False
+    assert preview["related_alert_count"] == 2
+    assert preview["unrelated_alert_count"] == 0
+    assert preview["total_alert_count"] == 2
+    ids = [record.get("id") for _, record in preview["records"]]
+    assert "alert-3" not in ids
+
+
+def test_preview_related_count_uses_incident_nested_alerts() -> None:
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "alertsCount": 2,
+            "alerts": [{"alertId": "alert-1"}, {"alertId": "alert-2"}],
+        }
+    ]
+    manager.alerts = [{"id": "alert-3", "name": "Noise"}]
+    preview = _pipeline(
+        manager, entities="Alerts,Incidents", has_related="Yes", max_fetch=5
+    ).preview(sample_limit=5)
+    assert preview["related_alert_count"] == 2
+    assert preview["unrelated_alert_count"] == 0
+
+
+def test_already_ingested_incident_skips_timeline_and_id_lookup() -> None:
+    manager = _sample_manager()
+    first = _pipeline(manager, entities="Alerts,Incidents", has_related="Yes").run()
+    assert manager.timeline_calls == ["inc-1"]
+    manager.alert_calls.clear()
+    manager.timeline_calls.clear()
+    second = _pipeline(manager, entities="Alerts,Incidents", has_related="Yes").run(
+        checkpoint=first["checkpoint"]
+    )
+    assert second["fetched"] == 0
+    assert manager.timeline_calls == []
+    assert not any(
+        call.get("alertIds") or call.get("vegaAlertIds") for call in manager.alert_calls
+    )
+
+
+def test_uuid_stubs_are_not_retried_as_vega_alert_ids() -> None:
+    uuid = "019e1b27-5119-7822-bde3-344b13e481cf"
+    manager = FakeManager()
+    manager.incidents = [
+        {"id": "inc-1", "name": "Campaign", "alerts": [{"alertId": uuid, "name": "Phish"}]}
+    ]
+    manager.alerts = [{"id": uuid, "name": "Phish"}]
+    _pipeline(manager, entities="Alerts,Incidents", has_related="Yes").run()
+    assert not any(call.get("vegaAlertIds") for call in manager.alert_calls)
+    assert any(uuid in (call.get("alertIds") or []) for call in manager.alert_calls)

@@ -18,6 +18,17 @@ GET_INCIDENT_DETAILS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Incident Details"
 UPDATE_ALERT_SCRIPT_NAME = f"{INTEGRATION_NAME} - Update Alert"
 UPDATE_INCIDENT_SCRIPT_NAME = f"{INTEGRATION_NAME} - Update Incident"
 APPLY_VEGA_LABELS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Apply Vega Labels as Tags"
+EXTRACT_RESET_PASSWORD_USER_SCRIPT_NAME = (
+    f"{INTEGRATION_NAME} - Extract Reset Password User"
+)
+GENERATE_RANDOM_PASSWORD_SCRIPT_NAME = (
+    f"{INTEGRATION_NAME} - Generate Random Password"
+)
+ADD_CASE_COMMENT_SCRIPT_NAME = f"{INTEGRATION_NAME} - Add Case Comment"
+DEFAULT_PASSWORD_LENGTH = 16
+MIN_PASSWORD_LENGTH = 12
+# Avoid quotes, backslashes, and brackets so the value is safe in playbook JSON.
+PASSWORD_SYMBOLS = "!@#$%^&*-_=+"
 
 CONNECTOR_NAME = "Vega Alerts and Incidents Connector"
 CHECKPOINT_PROPERTY_KEY = "vega_ingestion_checkpoint"
@@ -25,8 +36,12 @@ REMEDIATION_PROPERTY_KEY = "vega_sync_state"
 SOAR_CASE_SEARCH_PATH = "external/v1/search/CaseSearchEverything"
 SOAR_CASE_DETAILS_PATH = "external/v1/cases/GetCaseFullDetails/{case_id}"
 SOAR_SEARCH_PAGE_SIZE = 50
-# CaseSearchEverything: 1 = last modification (close updates this).
+# CaseSearchEverything: 1 = last modification (a case close updates this).
 SOAR_TIME_RANGE_MODIFIED = 1
+SOAR_DETAILS_GET_CAP = 25
+# CaseDataStatus.CLOSED in SecOps/Siemplify.
+SOAR_CASE_STATUS_CLOSED = 2
+SOAR_CASE_STATUS_OPEN = (0, 1)
 
 DEFAULT_API_ROOT = "https://api.vega.io"
 LOGIN_PATH = "/api/v1/login_machine"
@@ -40,6 +55,8 @@ BACKFILL_MAX = 365
 GRAPHQL_PAGE_SIZE = 50
 ALERT_EVENTS_PAGE_SIZE = 100
 ALERT_EVENTS_MAX_FETCH = 2500
+# SOAR attaches at most this many child events per Vega alert. Ingest stops
+# paging getAlertsEvents here so it does not download 2500 rows to keep 200.
 MAX_EVENTS_PER_ALERT = 200
 # Nested related Vega alerts are attached as events on the incident AlertInfo
 # (SOAR creates one case per AlertInfo unless grouping is enabled).
@@ -85,6 +102,8 @@ PARAM_INCIDENT_STATUSES = "Incident Statuses to Fetch"
 PARAM_INCIDENT_VERDICTS = "Incident Verdicts to Fetch"
 PARAM_SYNC = "Sync Case Close to Vega"
 PARAM_PYTHON_TIMEOUT = "PythonProcessTimeout"
+PYTHON_TIMEOUT_MIN = 30
+PYTHON_TIMEOUT_MAX = 3600
 
 SEVERITY_OPTIONS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 ALERT_STATUS_OPTIONS = ("OPEN", "IN PROGRESS", "PEER REVIEW", "RESOLVED")
@@ -134,113 +153,36 @@ MSG_TIMEOUT = (
 )
 MSG_UNREACHABLE = MSG_INVALID_API_ROOT
 
-# Compatible getAlerts: the original working selection set plus alertIds so the
-# Yes path can resolve incident-related alerts. Used when the full query is
-# rejected by the Vega schema (unknown field/type) so cases still ingest.
-GET_ALERTS_QUERY_COMPAT = """
-query GetAlerts(
-  $alertIds: [ID!],
-  $vegaAlertIds: [String!],
-  $alertSeverities: [AlertSeverity!],
-  $statuses: [AlertStatus!],
-  $alertVerdicts: [AlertVerdict!],
-  $hasRelatedIncidents: Boolean,
-  $from: Time,
-  $to: Time,
-  $updatedFrom: Time,
-  $updatedTo: Time,
-  $limit: Int,
-  $offset: Int
-) {
-  getAlerts(
-    alertIds: $alertIds,
-    vegaAlertIds: $vegaAlertIds,
-    alertSeverities: $alertSeverities,
-    statuses: $statuses,
-    alertVerdicts: $alertVerdicts,
-    hasRelatedIncidents: $hasRelatedIncidents,
-    from: $from,
-    to: $to,
-    updatedFrom: $updatedFrom,
-    updatedTo: $updatedTo,
-    limit: $limit,
-    offset: $offset
-  ) {
-    alerts {
-      id
-      vegaAlertId
-      detectionId
-      name
-      description
-      severity
-      status
-      assignee { userId displayName email }
-      assignees { userId displayName email }
-      dataSources
-      createdAt
-      updatedAt
-      mitre { mitreTactics mitreTechniques }
-      relatedIncidents { incidentId name }
-      detectionSource
-      detectionDescription
-      detectionQuery
-      eventCount
-      isTestMode
-      verdict
-      verdictReasoning
-      dedupCount
-      comments { text addedBy addedAt }
-      labels { name color }
-      href
-    }
-    total
-    limit
-    offset
-    error { code message }
-  }
-}
-""".strip()
-
-# Full getAlerts query. The Yes path passes alertIds collected from getIncidents.
-# The No path passes hasRelatedIncidents=false plus the connector time/filters.
+# getAlerts used by ingest. Arguments match what the connector sends. Extra
+# unused args (sortBy, originType, alertNames, ...) are omitted: unknown
+# arguments reject the whole query. AlertInfo fields including vegaAlertId
+# and labels are valid here (they are not valid on IncidentAlertSummary).
 GET_ALERTS_QUERY = """
 query GetAlerts(
-  $alertNames: [String!],
   $alertIds: [ID!],
   $vegaAlertIds: [String!],
   $alertSeverities: [AlertSeverity!],
   $statuses: [AlertStatus!],
-  $detectionIds: [ID!],
-  $dataSourceNames: [String!],
   $alertVerdicts: [AlertVerdict!],
   $hasRelatedIncidents: Boolean,
   $from: Time,
   $to: Time,
   $updatedFrom: Time,
   $updatedTo: Time,
-  $originType: AlertOriginType,
-  $sortBy: AlertSortFieldPublic,
-  $sortOrder: SortOrderPublic,
   $limit: Int,
   $offset: Int
 ) {
   getAlerts(
-    alertNames: $alertNames,
     alertIds: $alertIds,
     vegaAlertIds: $vegaAlertIds,
     alertSeverities: $alertSeverities,
     statuses: $statuses,
-    detectionIds: $detectionIds,
-    dataSourceNames: $dataSourceNames,
     alertVerdicts: $alertVerdicts,
     hasRelatedIncidents: $hasRelatedIncidents,
     from: $from,
     to: $to,
     updatedFrom: $updatedFrom,
     updatedTo: $updatedTo,
-    originType: $originType,
-    sortBy: $sortBy,
-    sortOrder: $sortOrder,
     limit: $limit,
     offset: $offset
   ) {
@@ -288,10 +230,11 @@ query GetAlerts(
 }
 """.strip()
 
-# Incident list used by the Yes path. Nested `alerts` is a stub type
-# (alertId, vegaAlertId, name, createdAt only). Do not add `labels` there:
-# Vega rejects the field and getIncidents returns no incidents at all.
-# Related-alert labels come from getAlerts, not this nested selection.
+# Incident list used by the Yes path. Nested `alerts` is IncidentAlertSummary
+# (alertId, name, createdAt only). Do not add `vegaAlertId` or `labels` there:
+# Vega rejects those fields and getIncidents returns no incidents at all.
+# Related-alert vegaAlertId and labels come from getAlerts, not this nested
+# selection.
 GET_INCIDENTS_QUERY = """
 query GetIncidents(
   $incidentNames: [String!],
@@ -349,7 +292,7 @@ query GetIncidents(
       assets
       observables
       alertsCount
-      alerts { alertId vegaAlertId name createdAt }
+      alerts { alertId name createdAt }
       recommendedActions { name description actionKey targetParams }
       investigationPlan {
         stepName
@@ -368,11 +311,6 @@ query GetIncidents(
   }
 }
 """.strip()
-
-GET_INCIDENTS_QUERY_COMPAT = GET_INCIDENTS_QUERY.replace(
-    "alerts { alertId vegaAlertId name createdAt }",
-    "alerts { alertId name createdAt }",
-)
 
 GET_ALERT_EVENTS_QUERY = """
 query GetAlertsEvents($alertId: ID!, $limit: Int, $offset: Int) {

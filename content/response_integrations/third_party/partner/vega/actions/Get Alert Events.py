@@ -8,6 +8,7 @@ from soar_sdk.ScriptResult import EXECUTION_STATE_COMPLETED, EXECUTION_STATE_FAI
 def main():
     siemplify = SiemplifyAction()
     from ..core.constants import (
+        ALERT_EVENTS_MAX_FETCH,
         GET_ALERT_EVENTS_SCRIPT_NAME,
         INTEGRATION_NAME,
         PARAM_ACCESS_KEY,
@@ -45,14 +46,17 @@ def main():
         fetched = False
         for candidate in candidates:
             try:
-                all_events = manager.get_all_alert_events(candidate, page_size=page_size)
+                all_events = manager.get_all_alert_events(
+                    candidate,
+                    page_size=page_size,
+                    max_records=ALERT_EVENTS_MAX_FETCH,
+                )
             except Exception as error:
                 last_error = error
                 continue
             fetched = True
             used_id = candidate
-            if all_events:
-                break
+            break
         if not fetched:
             raise last_error or ValueError("Unable to fetch Vega alert events.")
         result = {
