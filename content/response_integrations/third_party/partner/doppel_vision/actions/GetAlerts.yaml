@@ -4,7 +4,7 @@ description: 'Fetches all alerts from Doppel Tenant at once.
 
     Doesn''t require any input parameters.'
 dynamic_results_metadata:
--   result_example_path: null
+-   result_example_path: resources/GetAlerts_JsonResult_example.json
     result_name: JsonResult
     show_result: true
 integration_identifier: DoppelVision

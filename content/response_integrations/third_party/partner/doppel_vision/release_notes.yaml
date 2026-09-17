@@ -43,3 +43,12 @@
   item_type: Integration
   publish_time: '2026-09-08'
   ticket_number: '547696660'
+- description: 'Feature: Added Doppel API v2 support with OAuth client credentials
+    while keeping v1 API Key auth as the default. Existing v1 configurations continue
+    to work without changes. Update Alert now accepts an optional Comment. Ping no
+    longer logs credentials.'
+  version: 8.0
+  item_name: DoppelVision
+  item_type: Integration
+  publish_time: '2026-09-16'
+  ticket_number: ''

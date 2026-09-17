@@ -1,0 +1,27 @@
+{
+  "id": "ACM-3",
+  "alert_id": "ACM-3",
+  "entity": "https://dummyabuseurl.com",
+  "entity_content": {
+    "value": "https://dummyabuseurl.com",
+    "type": "url"
+  },
+  "severity": "high",
+  "tags": ["abuse"],
+  "audit_logs": [],
+  "queue_state": "doppel_review",
+  "entity_state": "active",
+  "product": "domains",
+  "platform": "web",
+  "source": "abuse",
+  "created_at": "2026-01-15T14:00:00Z",
+  "last_activity_timestamp": "2026-01-15T14:00:00Z",
+  "notes": null,
+  "uploaded_by": "analyst@example.com",
+  "brand": null,
+  "assignee": null,
+  "alert_summary": null,
+  "doppel_link": "https://app.doppel.com/alerts/ACM-3",
+  "score": null,
+  "screenshot_url": null
+}

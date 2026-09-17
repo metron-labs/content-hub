@@ -4,7 +4,7 @@ from soar_sdk.ScriptResult import EXECUTION_STATE_COMPLETED, EXECUTION_STATE_FAI
 from soar_sdk.SiemplifyAction import SiemplifyAction
 from soar_sdk.SiemplifyUtils import output_handler
 
-from ..core.DoppelManager import DoppelManager
+from ..core.config import create_manager_from_siemplify
 
 
 @output_handler
@@ -12,21 +12,6 @@ def main():
     siemplify = SiemplifyAction()
     siemplify.script_name = "Get Alerts Action"
 
-    # Extract configuration parameters
-    api_key = siemplify.extract_configuration_param(
-        provider_name="DoppelVision",
-        param_name="API Key",
-    )
-    user_api_key = siemplify.extract_configuration_param(
-        provider_name="DoppelVision",
-        param_name="User API Key",
-    )
-    org_code = siemplify.extract_configuration_param(
-        provider_name="DoppelVision",
-        param_name="Organization Code",
-    )
-
-    # Extract optional action parameters
     search_key = siemplify.extract_action_param(
         param_name="Search Key",
         default_value=None,
@@ -59,10 +44,8 @@ def main():
     )
     tags = siemplify.extract_action_param(param_name="Tags", default_value=None)
 
-    # Parse tags into a list if provided
     tags_list = tags.split(",") if tags else None
 
-    # Build filters dictionary
     filters = {
         "search_key": search_key,
         "queue_state": queue_state,
@@ -74,37 +57,24 @@ def main():
         "page": page,
         "tags": tags_list,
     }
-
-    # Remove None values from filters
     filters = {key: value for key, value in filters.items() if value is not None}
 
-    # Instantiate the manager
-    manager = DoppelManager(api_key=api_key, user_api_key=user_api_key, org_code=org_code)
-
-    # Initialize action result values
     status = EXECUTION_STATE_COMPLETED
     output_message = "Alerts retrieved successfully."
     result_value = True
 
     try:
-        # Perform the get_alerts action
+        manager = create_manager_from_siemplify(siemplify)
         siemplify.LOGGER.info(f"Fetching alerts with filters: {filters}")
         alerts = manager.get_alerts(filters=filters)
-
-        if alerts:
-            siemplify.result.add_result_json(
-                alerts,
-            )  # Store alerts in the action result JSON
-            siemplify.LOGGER.info(f"Total alerts retrieved: {len(alerts)}")
-        else:
-            raise Exception("No alerts found or empty response received.")
+        siemplify.result.add_result_json(alerts)
+        siemplify.LOGGER.info(f"Total alerts retrieved: {len(alerts)}")
     except Exception as e:
         output_message = f"Failed to retrieve alerts: {e!s}"
         status = EXECUTION_STATE_FAILED
         result_value = False
         siemplify.LOGGER.error(output_message)
 
-    # Log results and complete the action
     siemplify.LOGGER.info(
         f"Action Completed: Status: {status}, Result : {result_value}, Output: {output_message}",
     )
