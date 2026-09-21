@@ -1,9 +1,10 @@
 import pytest
 
-from core.constants import GRAPHQL_PAGE_SIZE
-from core.exceptions import VegaValidationException
+from core.constants import GRAPHQL_PAGE_SIZE, MSG_BAD_REQUEST, MSG_INVALID_ACCESS_KEY_ID
+from core.exceptions import VegaBadRequestException, VegaUnauthorizedException, VegaValidationException
 from core.utils import (
     format_test_connection_summary,
+    format_user_facing_error,
     resolve_incident_filters,
     validate_connector_fields,
 )
@@ -99,6 +100,26 @@ def test_format_test_connection_summary_hides_unrelated_when_yes_only() -> None:
     assert "unrelated" not in text.lower()
     assert "- Total Vega alerts: 1" in text
     assert "105" not in text
+
+
+def test_test_connection_maps_graphql_400_to_invalid_access_key_id() -> None:
+    manager = VegaManager(
+        api_root="https://api.vega.io",
+        access_key_id="kid",
+        access_key="secret",
+        session=DummySession(),
+        sleeper=lambda _seconds: None,
+    )
+
+    def _get_alerts(_variables, max_records=None):
+        raise VegaBadRequestException(MSG_BAD_REQUEST)
+
+    manager.get_alerts = _get_alerts
+    with pytest.raises(VegaUnauthorizedException) as exc:
+        manager.test_connection()
+    assert str(exc.value) == MSG_INVALID_ACCESS_KEY_ID
+    assert format_user_facing_error(exc.value) == MSG_INVALID_ACCESS_KEY_ID
+    assert "Check filters and identifiers" not in format_user_facing_error(exc.value)
 
 
 def test_count_alerts_uses_graphql_total() -> None:

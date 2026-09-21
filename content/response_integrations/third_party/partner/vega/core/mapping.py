@@ -183,7 +183,7 @@ def case_display_name(record: dict, entity_type: str) -> str:
     name = record_name(record)
     if display_id:
         return f"Vega {entity_type} - {display_id} - {name} TEST 01"
-    return f"Vega {entity_type} - {name} TEST 01"
+    return f"Vega {entity_type} - {name} TEST 02"
 
 
 def incident_case_title(record: dict, related_batch: int = 0) -> str:

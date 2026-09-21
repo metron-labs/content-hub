@@ -216,7 +216,8 @@ def _run_test_connection(siemplify, params) -> tuple[list, str]:
     from ..core.utils import format_test_connection_summary
 
     _validate_params(params)
-    _, pipeline = _build_manager_and_pipeline(siemplify, params)
+    manager, pipeline = _build_manager_and_pipeline(siemplify, params)
+    manager.test_connection()
     preview = pipeline.preview()
     alerts = create_alerts(preview.get("records") or [], siemplify, None)
     summary = format_test_connection_summary(
@@ -252,6 +253,7 @@ def _run_ingest(siemplify, params) -> list:
 
     _validate_params(params)
     manager, pipeline = _build_manager_and_pipeline(siemplify, params)
+    manager.test_connection()
     checkpoint = _read_json(
         siemplify, _connector_id(siemplify), CHECKPOINT_PROPERTY_KEY
     )
