@@ -6,7 +6,8 @@ Connector flow
    Has Related Incidents) and constructs this pipeline.
 2. `run()` computes the time window from checkpoint + lookback/backfill.
    If a cycle stops early to avoid connector timeout, the checkpoint stores
-   the last packaged record timestamp so the next run continues from there.
+   the last packaged record timestamp (not the current time) so the next
+   run continues the remaining incidents, alerts, and events.
 3. Vega Entities to Fetch and Has Related Incidents together decide what is
    packaged. Each emitted record becomes one SOAR alert inside a case:
 
@@ -99,7 +100,8 @@ class IngestionPipeline:
         alert_verdicts: str = "",
         has_related: str = "Yes,No",
         incident_severities: str = "",
-        incident_statuses: str = "",
+        incident_user_statuses: str = "",
+        incident_investigation_statuses: str = "",
         incident_verdicts: str = "",
         max_fetch: Optional[int] = None,
         max_alerts_per_case: int = MAX_ALERTS_PER_CASE,
@@ -122,7 +124,8 @@ class IngestionPipeline:
         self.incident_filters = resolve_incident_filters(
             {
                 "incident_severities": incident_severities,
-                "incident_statuses": incident_statuses,
+                "incident_user_statuses": incident_user_statuses,
+                "incident_investigation_statuses": incident_investigation_statuses,
                 "incident_verdicts": incident_verdicts,
             }
         )
@@ -178,7 +181,8 @@ class IngestionPipeline:
         return _drop_none(
             {
                 "severities": filters["severities"],
-                "statuses": filters["statuses"],
+                "userStatuses": filters["user_statuses"],
+                "investigationStatuses": filters["investigation_statuses"],
                 "verdicts": filters["verdicts"],
                 "from": window.get("from"),
                 "to": window.get("to"),
@@ -192,7 +196,10 @@ class IngestionPipeline:
         if not identifier:
             return record
         try:
-            events = self.manager.get_all_incident_timeline(identifier)
+            events = self.manager.get_all_incident_timeline(
+                identifier, deadline_monotonic=self._deadline
+            )
+            self._mark_if_truncated()
             record = dict(record)
             record["timeline"] = events
             self._log(
@@ -213,12 +220,17 @@ class IngestionPipeline:
     def _now(self) -> float:
         return time.monotonic()
 
+    def _deadline_reached(self) -> bool:
+        return self._deadline is not None and self._now() >= self._deadline
+
+    def _mark_if_truncated(self) -> None:
+        if getattr(self.manager, "last_fetch_truncated", False):
+            self._incomplete = True
+
     def _should_stop(self, collected: int) -> bool:
         if self._remaining(collected) == 0:
             return True
-        if self._deadline is None or collected <= 0:
-            return False
-        if self._now() < self._deadline:
+        if not self._deadline_reached():
             return False
         if not self._incomplete:
             self._incomplete = True
@@ -255,7 +267,10 @@ class IngestionPipeline:
         used_id = candidates[0]
         for alert_id in candidates:
             try:
-                events = self.manager.get_all_alert_events(alert_id)
+                events = self.manager.get_all_alert_events(
+                    alert_id, deadline_monotonic=self._deadline
+                )
+                self._mark_if_truncated()
             except Exception as exc:
                 self._log(
                     "warning",
@@ -347,7 +362,10 @@ class IngestionPipeline:
                     variables = self._alert_variables(
                         lookup_window, None, vega_alert_ids=batch
                     )
-                page = self.manager.get_alerts(variables, len(batch))
+                page = self.manager.get_alerts(
+                    variables, len(batch), deadline_monotonic=self._deadline
+                )
+                self._mark_if_truncated()
             except Exception as exc:
                 self._log("warning", "Unable to fetch Vega alerts by %s: %s", key, exc)
                 return []
@@ -355,6 +373,9 @@ class IngestionPipeline:
 
         def _lookup_batches(ids: list[str], *, use_alert_ids: bool) -> None:
             for index in range(0, len(ids), batch_size):
+                if self._deadline_reached():
+                    self._incomplete = True
+                    return
                 collected.extend(
                     _lookup(ids[index : index + batch_size], use_alert_ids=use_alert_ids)
                 )
@@ -381,10 +402,13 @@ class IngestionPipeline:
                 collected = [
                     item
                     for item in self.manager.get_alerts(
-                        self._alert_variables(window, True), self._pool_limit()
+                        self._alert_variables(window, True),
+                        self._pool_limit(),
+                        deadline_monotonic=self._deadline,
                     )
                     if isinstance(item, dict)
                 ]
+                self._mark_if_truncated()
             except Exception as exc:
                 self._log(
                     "warning",
@@ -630,9 +654,13 @@ class IngestionPipeline:
             return
         try:
             incidents = self.manager.get_incidents(
-                self._incident_variables(window), remaining
+                self._incident_variables(window),
+                remaining,
+                deadline_monotonic=self._deadline,
             )
+            self._mark_if_truncated()
         except Exception as exc:
+            self._incomplete = True
             self._log("error", "Unable to fetch Vega incidents: %s", exc)
             return
         incidents = self._sort_by_timestamp(
@@ -640,7 +668,7 @@ class IngestionPipeline:
         )
         self._log("info", "Fetched %s Vega incident(s).", len(incidents))
         related_index: dict[str, dict] = {}
-        if include_related and incidents:
+        if include_related and incidents and not self._should_stop(len(records)):
             all_alert_ids: list[str] = []
             for incident in incidents:
                 all_alert_ids.extend(self._new_related_alert_ids(incident, ingested_set))
@@ -717,9 +745,13 @@ class IngestionPipeline:
             return
         try:
             alerts = self.manager.get_alerts(
-                self._alert_variables(window, has_related), remaining
+                self._alert_variables(window, has_related),
+                remaining,
+                deadline_monotonic=self._deadline,
             )
+            self._mark_if_truncated()
         except Exception as exc:
+            self._incomplete = True
             self._log("error", "Unable to fetch %s Vega alerts: %s", label, exc)
             return
         alerts = self._sort_by_timestamp(
@@ -924,7 +956,7 @@ class IngestionPipeline:
             plan["nest_related_alerts"],
             plan["standalone_related_alerts"],
             plan["standalone_unrelated_alerts"],
-            {key: window.get(key) for key in ("from", "to", "updated_from", "updated_to")},
+            {key: window.get(key) for key in ("from", "to", "updated_from", "updated_to", "origin_from")},
             checkpoint_ids,
         )
 
@@ -957,11 +989,13 @@ class IngestionPipeline:
         if len(ingested) > INGESTED_ID_CAP:
             ingested = ingested[-INGESTED_ID_CAP:]
         state["ingested_ids"] = ingested
+        state["origin_from"] = window.get("origin_from") or state.get("origin_from")
         if self._incomplete:
+            # Keep the previous watermark when this cycle packaged nothing.
             if self._progress_ts is not None:
                 state["watermark"] = to_iso(self._progress_ts)
             state["incomplete"] = True
-            state["query_mode"] = window.get("query_mode") or state.get("query_mode") or "created"
+            state["query_mode"] = "created"
         else:
             state["watermark"] = window["end"]
             state["incomplete"] = False

@@ -10,6 +10,8 @@ from core.constants import (
     GET_INCIDENTS_QUERY,
     SOAR_ALERT_TYPE_ALERT,
     SOAR_ALERT_TYPE_INCIDENT,
+    UPDATE_INCIDENTS_MUTATION,
+    UPDATE_INCIDENTS_STATUS_MUTATION,
 )
 from core.mapping import (
     alert_grouping_id,
@@ -93,17 +95,26 @@ def test_collect_label_tags_unions_incident_and_alert_labels() -> None:
 
 
 def test_graphql_queries_request_label_name_and_color_only() -> None:
-    for query in (GET_ALERTS_QUERY, GET_INCIDENTS_QUERY):
-        assert "labels { name color }" in query
-        assert "labels { id" not in query
-        assert "categoryId" not in query
-        assert "usageCount" not in query
+    assert "labels { name color }" in GET_ALERTS_QUERY
+    assert "labels { id" not in GET_ALERTS_QUERY
+    assert "categoryId" not in GET_ALERTS_QUERY
+    assert "usageCount" not in GET_ALERTS_QUERY
+    assert "labels { id categoryId name color usageCount }" in GET_INCIDENTS_QUERY
+    assert "investigationStatus" in GET_INCIDENTS_QUERY
+    assert "userStatus" in GET_INCIDENTS_QUERY
+    assert "$statuses:" not in GET_INCIDENTS_QUERY
+    assert "statuses: $statuses" not in GET_INCIDENTS_QUERY
     assert "sortBy" not in GET_ALERTS_QUERY
     assert "originType" not in GET_ALERTS_QUERY
     assert "escalation" in GET_ALERTS_QUERY
     assert "alerts { alertId name createdAt }" in GET_INCIDENTS_QUERY
     assert "alerts { alertId vegaAlertId" not in GET_INCIDENTS_QUERY
     assert "alerts { alertId name createdAt labels" not in GET_INCIDENTS_QUERY
+    for query in (UPDATE_INCIDENTS_MUTATION, UPDATE_INCIDENTS_STATUS_MUTATION):
+        assert "userStatus" in query
+        assert "investigationStatus" in query
+        assert "incidentId status" not in query
+        assert "\n      status\n" not in query
 
 
 def test_stub_to_alert_keeps_nested_labels() -> None:
@@ -377,6 +388,8 @@ def test_summary_event_carries_incident_id_and_alert_type() -> None:
 
 _EMPTY_API_KEYS = (
     "status",
+    "user_status",
+    "investigation_status",
     "verdict",
     "verdict_reasoning",
     "description",
@@ -464,7 +477,8 @@ def test_incident_event_maps_get_incidents_fields() -> None:
             "name": "Campaign",
             "incidentSummary": "summary",
             "incidentFindings": "findings",
-            "status": "NEW",
+            "investigationStatus": "NEW",
+            "userStatus": "OPEN",
             "severity": "HIGH",
             "recommendedActions": [{"name": "block"}],
             "investigationPlan": [{"stepName": "scope"}],
@@ -483,6 +497,9 @@ def test_incident_event_maps_get_incidents_fields() -> None:
     assert event["description"] == "summary"
     assert event["incident_findings"] == "findings"
     assert event["created_by"] == "analyst"
+    assert event["investigation_status"] == "NEW"
+    assert event["user_status"] == "OPEN"
+    assert "status" not in event
     assert event["source_url"] == "https://vega.example/incidents/1"
     assert "vega_alert_id" not in event
     assert "detection_id" not in event
@@ -602,6 +619,31 @@ def test_alert_event_payload_maps_dynamic_api_fields() -> None:
     assert "empty_list" not in event
     assert "vega_incident_id" not in event
     assert "source_grouping_identifier" not in event
+
+
+def test_child_event_overwrites_invalid_payload_times() -> None:
+    event = build_vega_alert_event_dict(
+        {"id": "alert-1", "vegaAlertId": "VALERT-1"},
+        {
+            "name": "login",
+            "StartTime": "invalid",
+            "starttime": "0",
+            "Time": "not-a-date",
+            "_time": "0",
+            "timestamp": "none",
+        },
+        1_700_000_000_000,
+        1_700_000_000_000,
+        0,
+    )
+    assert event["StartTime"] == 1_700_000_000_000
+    assert event["EndTime"] == 1_700_000_000_000
+    assert event["start_time"] == 1_700_000_000_000
+    assert event["end_time"] == 1_700_000_000_000
+    assert "starttime" not in event
+    assert "Time" not in event
+    assert "_time" not in event
+    assert "timestamp" not in event
 
 
 def test_extract_sync_targets_incident_case_ignores_related_alerts() -> None:

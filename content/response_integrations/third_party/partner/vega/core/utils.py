@@ -15,7 +15,8 @@ from .constants import (
     BACKFILL_MAX,
     BACKFILL_MIN,
     ENTITY_OPTIONS,
-    INCIDENT_STATUS_OPTIONS,
+    INCIDENT_INVESTIGATION_STATUS_OPTIONS,
+    INCIDENT_USER_STATUS_OPTIONS,
     LOOKBACK_MAX,
     LOOKBACK_MIN,
     MSG_BAD_REQUEST,
@@ -34,8 +35,9 @@ from .constants import (
     PARAM_BACKFILL,
     PARAM_ENTITIES,
     PARAM_HAS_RELATED,
+    PARAM_INCIDENT_INVESTIGATION_STATUSES,
     PARAM_INCIDENT_SEVERITIES,
-    PARAM_INCIDENT_STATUSES,
+    PARAM_INCIDENT_USER_STATUSES,
     PARAM_INCIDENT_VERDICTS,
     PARAM_LOOKBACK,
     PARAM_PYTHON_TIMEOUT,
@@ -338,10 +340,15 @@ def resolve_incident_filters(config: dict) -> dict:
             SEVERITY_OPTIONS,
             param_name=PARAM_INCIDENT_SEVERITIES,
         ),
-        "statuses": resolve_multi_filter(
-            config.get("incident_statuses"),
-            INCIDENT_STATUS_OPTIONS,
-            param_name=PARAM_INCIDENT_STATUSES,
+        "user_statuses": resolve_multi_filter(
+            config.get("incident_user_statuses"),
+            INCIDENT_USER_STATUS_OPTIONS,
+            param_name=PARAM_INCIDENT_USER_STATUSES,
+        ),
+        "investigation_statuses": resolve_multi_filter(
+            config.get("incident_investigation_statuses"),
+            INCIDENT_INVESTIGATION_STATUS_OPTIONS,
+            param_name=PARAM_INCIDENT_INVESTIGATION_STATUSES,
         ),
         "verdicts": resolve_multi_filter(
             config.get("incident_verdicts"),
@@ -492,7 +499,8 @@ def validate_connector_fields(
     alert_verdicts: Any = "",
     has_related: Any = "Yes,No",
     incident_severities: Any = "",
-    incident_statuses: Any = "",
+    incident_user_statuses: Any = "",
+    incident_investigation_statuses: Any = "",
     incident_verdicts: Any = "",
     python_timeout: Any = None,
 ) -> None:
@@ -548,9 +556,16 @@ def validate_connector_fields(
     )
     _check(
         lambda: resolve_multi_filter(
-            incident_statuses,
-            INCIDENT_STATUS_OPTIONS,
-            param_name=PARAM_INCIDENT_STATUSES,
+            incident_user_statuses,
+            INCIDENT_USER_STATUS_OPTIONS,
+            param_name=PARAM_INCIDENT_USER_STATUSES,
+        )
+    )
+    _check(
+        lambda: resolve_multi_filter(
+            incident_investigation_statuses,
+            INCIDENT_INVESTIGATION_STATUS_OPTIONS,
+            param_name=PARAM_INCIDENT_INVESTIGATION_STATUSES,
         )
     )
     _check(
@@ -638,33 +653,32 @@ def compute_time_window(
     current = now or utc_now()
     lookback = timedelta(minutes=lookback_minutes)
     state = checkpoint or {}
+    origin = parse_iso_timestamp(state.get("origin_from"))
+    if origin is None:
+        origin = current - timedelta(days=backfill_days) - lookback
     watermark = parse_iso_timestamp(state.get("watermark"))
     incomplete = bool(state.get("incomplete"))
     query_mode = str(state.get("query_mode") or "").strip().lower()
-    if watermark is None:
-        start = current - timedelta(days=backfill_days) - lookback
+    # Missing origin_from means an upgraded or poisoned checkpoint that already
+    # jumped watermark to "now". Rescan the original createdAt backfill and skip
+    # ingested IDs instead of polling a 5-minute updatedAt window.
+    catching_up = (
+        incomplete
+        or query_mode == "created"
+        or not str(state.get("origin_from") or "").strip()
+    )
+    if catching_up:
         return {
-            "first_run": True,
+            "first_run": watermark is None,
             "query_mode": "created",
-            "from": to_iso(start),
+            "from": to_iso(origin),
             "to": to_iso(current),
             "updated_from": None,
             "updated_to": None,
             "end": to_iso(current),
+            "origin_from": to_iso(origin),
         }
-    start = watermark - lookback
-    # An unfinished createdAt backfill must not switch to updatedAt or the
-    # remaining older records would be skipped.
-    if incomplete and query_mode == "created":
-        return {
-            "first_run": True,
-            "query_mode": "created",
-            "from": to_iso(start),
-            "to": to_iso(current),
-            "updated_from": None,
-            "updated_to": None,
-            "end": to_iso(current),
-        }
+    start = (watermark or origin) - lookback
     return {
         "first_run": False,
         "query_mode": "updated",
@@ -673,6 +687,7 @@ def compute_time_window(
         "updated_from": to_iso(start),
         "updated_to": to_iso(current),
         "end": to_iso(current),
+        "origin_from": to_iso(origin),
     }
 
 

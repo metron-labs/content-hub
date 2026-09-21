@@ -300,8 +300,9 @@ def _is_vega_event_payload(payload: dict) -> bool:
 def _explicit_soar_closed_flag(payload: dict) -> bool | None:
     """SOAR closed flag only. None means the payload has no case-closed field.
 
-    Vega events map ``status`` (OPEN/RESOLVED) onto the same case dict. That
-    field is not a SecOps close and must not trigger outbound resolve.
+    Vega events map ``status`` / ``userStatus`` (OPEN/RESOLVED) onto the same
+    case dict. Those fields are not a SecOps close and must not trigger
+    outbound resolve.
     """
     flag = _first_present(payload, _SOAR_CLOSED_FLAG_KEYS)
     if isinstance(flag, bool):
@@ -358,7 +359,8 @@ def is_soar_case_closed(payload: dict) -> bool:
     """True only when SecOps/SOAR marks the case closed.
 
     Accepts ``isClosed`` / ``statusName=CLOSED`` / numeric ``status=2``
-    (CaseDataStatus.CLOSED). Vega event ``status`` (OPEN/RESOLVED) is ignored.
+    (CaseDataStatus.CLOSED). Vega event ``status`` / ``userStatus``
+    (OPEN/RESOLVED) is ignored.
     """
     if not isinstance(payload, dict):
         return False

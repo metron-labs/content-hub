@@ -40,7 +40,9 @@ def main():
         if current:
             incident_ids = [current]
     payload = {"incidentIds": incident_ids}
-    status = str(siemplify.extract_action_param("Status", default_value="") or "").strip()
+    user_status = str(
+        siemplify.extract_action_param("User Status", default_value="") or ""
+    ).strip()
     severity = str(siemplify.extract_action_param("Severity", default_value="") or "").strip()
     verdict = str(siemplify.extract_action_param("Verdict", default_value="") or "").strip()
     reasoning = str(
@@ -50,8 +52,8 @@ def main():
     emails = parse_csv_list(
         siemplify.extract_action_param("Assignee Emails", default_value="")
     )
-    if status:
-        payload["status"] = to_graphql_enum(status)
+    if user_status:
+        payload["userStatus"] = to_graphql_enum(user_status)
     if severity:
         payload["severity"] = severity
     if verdict or reasoning:

@@ -53,6 +53,20 @@ _SKIP_PAYLOAD_KEYS = {
     "vega_labels",
     "vega_incident_label_names",
 }
+# Vega/Splunk payloads use mixed-case time keys. SecOps ontology maps StartTime
+# from the event; extra time fields overwrite it or show as 1970/invalid.
+_SKIP_TIME_NORMALIZED = {
+    "starttime",
+    "endtime",
+    "time",
+    "timestamp",
+    "eventtime",
+    "datetime",
+    "date",
+    "occurredat",
+    "origintime",
+    "indextime",
+}
 RESET_USER_PASSWORD_ACTION_KEY = "reset_user_password"
 
 _ENTITY_ALIASES = {
@@ -168,8 +182,8 @@ def case_display_name(record: dict, entity_type: str) -> str:
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} TEST 90"
-    return f"Vega {entity_type} - {name} TEST 90"
+        return f"Vega {entity_type} - {display_id} - {name} TEST 01"
+    return f"Vega {entity_type} - {name} TEST 01"
 
 
 def incident_case_title(record: dict, related_batch: int = 0) -> str:
@@ -565,6 +579,25 @@ def _soar_key(key: Any) -> str:
     return text[:80]
 
 
+def _normalized_field_name(key: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(key or "").lower())
+
+
+def _is_skipped_payload_key(key: Any) -> bool:
+    text = str(key or "").strip()
+    if not text or text in _SKIP_PAYLOAD_KEYS:
+        return True
+    return _normalized_field_name(text) in _SKIP_TIME_NORMALIZED
+
+
+def _apply_event_times(event: dict, start_time: int, end_time: int) -> None:
+    """Force ontology StartTime/EndTime after payload mapping so Vega times cannot win."""
+    event["StartTime"] = start_time
+    event["EndTime"] = end_time
+    event["start_time"] = start_time
+    event["end_time"] = end_time
+
+
 def _soar_value(value: Any, *, limit: int = _MAX_EVENT_FIELD_CHARS) -> str:
     if value is None:
         return ""
@@ -671,7 +704,8 @@ _INCIDENT_API_FIELDS = (
     ("createdBy", "created_by"),
     ("createdAt", "created_at"),
     ("lastUpdated", "updated_at"),
-    ("status", "status"),
+    ("investigationStatus", "investigation_status"),
+    ("userStatus", "user_status"),
     ("dataSources", "data_sources"),
     ("verdict", "verdict"),
     ("verdictReasoning", "verdict_reasoning"),
@@ -782,6 +816,7 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
         event["details"] = details
     event.update(_flatten_entities(record))
     _apply_recommended_action_fields(event, record)
+    _apply_event_times(event, start_time, end_time)
     return event
 
 
@@ -859,7 +894,7 @@ def reset_password_users_from_payload(payload: dict) -> list[str]:
 
     if not isinstance(payload, dict):
         return users
-    _add(payload.get("vega_reset_password_user"))
+    _add(payload.get("vega_target_users"))
     records = [payload]
     details = _try_parse_json(payload.get("details"))
     if isinstance(details, dict):
@@ -876,7 +911,7 @@ def _apply_recommended_action_fields(event: dict, record: dict) -> None:
     """Expose recommended-action keys and Okta reset target on the SOAR event.
 
     Playbooks can trigger on `vega_recommended_action_keys` / `recommended_actions`
-    and read `vega_reset_password_user` instead of hardcoded emails.
+    and read `vega_target_users` instead of hardcoded emails.
     """
     keys: list[str] = []
     for item in _recommended_action_items(record):
@@ -888,7 +923,7 @@ def _apply_recommended_action_fields(event: dict, record: dict) -> None:
     reset_users = reset_password_users_from_payload(record)
     if not reset_users:
         return
-    event["vega_reset_password_user"] = ",".join(reset_users)
+    event["vega_target_users"] = ",".join(reset_users)
     _merge_csv_values(event, "user", reset_users)
 
 
@@ -920,13 +955,13 @@ def _is_flat_dict(value: dict) -> bool:
 def _iter_dynamic_fields(payload: dict):
     """Yield API keys/values from getAlertsEvents, flattening one-level dicts."""
     for key, value in payload.items():
-        if str(key) in _SKIP_PAYLOAD_KEYS:
+        if _is_skipped_payload_key(key):
             continue
         if not _has_mapped_value(value):
             continue
         if isinstance(value, dict) and _is_flat_dict(value):
             for nested_key, nested_value in value.items():
-                if str(nested_key) in _SKIP_PAYLOAD_KEYS:
+                if _is_skipped_payload_key(nested_key):
                     continue
                 if not _has_mapped_value(nested_value):
                     continue
@@ -988,7 +1023,7 @@ def build_vega_alert_event_dict(
         if extra >= _MAX_EXTRA_FIELDS:
             break
         safe_key = _soar_key(key)
-        if not safe_key or safe_key in event:
+        if not safe_key or safe_key in event or _is_skipped_payload_key(safe_key):
             continue
         event[safe_key] = _soar_value(value)
         extra += 1
@@ -1002,6 +1037,7 @@ def build_vega_alert_event_dict(
         event["details"] = _soar_value(details_payload, limit=_MAX_DETAILS_CHARS)
     event.update(_flatten_entities(payload))
     _apply_entity_aliases(event, payload)
+    _apply_event_times(event, start_time, end_time)
     return event
 
 

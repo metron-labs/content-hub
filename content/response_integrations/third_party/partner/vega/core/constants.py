@@ -98,7 +98,8 @@ PARAM_ALERT_STATUSES = "Alert Statuses to Fetch"
 PARAM_ALERT_VERDICTS = "Alert Verdicts to Fetch"
 PARAM_HAS_RELATED = "Has Related Incidents"
 PARAM_INCIDENT_SEVERITIES = "Incident Severities to Fetch"
-PARAM_INCIDENT_STATUSES = "Incident Statuses to Fetch"
+PARAM_INCIDENT_USER_STATUSES = "Incident User Statuses to Fetch"
+PARAM_INCIDENT_INVESTIGATION_STATUSES = "Incident Investigation Statuses to Fetch"
 PARAM_INCIDENT_VERDICTS = "Incident Verdicts to Fetch"
 PARAM_SYNC = "Sync Case Close to Vega"
 PARAM_PYTHON_TIMEOUT = "PythonProcessTimeout"
@@ -107,16 +108,12 @@ PYTHON_TIMEOUT_MAX = 3600
 
 SEVERITY_OPTIONS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 ALERT_STATUS_OPTIONS = ("OPEN", "IN PROGRESS", "PEER REVIEW", "RESOLVED")
-INCIDENT_STATUS_OPTIONS = (
+INCIDENT_USER_STATUS_OPTIONS = ("OPEN", "IN REVIEW", "ON HOLD", "RESOLVED")
+INCIDENT_INVESTIGATION_STATUS_OPTIONS = (
     "NEW",
     "INVESTIGATING",
-    "ON HOLD",
-    "EXTERNAL ESCALATION",
-    "RESOLVED",
-    "REOPENED",
-    "REVIEW RECOMMENDED",
-    "RESPONSE REQUIRED",
-    "UNDER REVIEW",
+    "COMPLETED",
+    "FAILED",
 )
 VERDICT_OPTIONS = ("MALICIOUS", "SUSPICIOUS", "BENIGN", "INCONCLUSIVE", "NA")
 ENTITY_OPTIONS = ("Alerts", "Incidents")
@@ -242,7 +239,8 @@ query GetIncidents(
   $incidentIds: [ID!],
   $vegaIncidentIds: [String!],
   $severities: [IncidentSeverity!],
-  $statuses: [IncidentStatusPublic!],
+  $investigationStatuses: [IncidentInvestigationStatusPublic!],
+  $userStatuses: [IncidentUserStatusPublic!],
   $verdicts: [IncidentVerdictPublic!],
   $assets: [String!],
   $from: Time,
@@ -260,7 +258,8 @@ query GetIncidents(
     incidentIds: $incidentIds,
     vegaIncidentIds: $vegaIncidentIds,
     severities: $severities,
-    statuses: $statuses,
+    investigationStatuses: $investigationStatuses,
+    userStatuses: $userStatuses,
     verdicts: $verdicts,
     assets: $assets,
     from: $from,
@@ -280,7 +279,8 @@ query GetIncidents(
       createdAt
       lastUpdated
       severity
-      status
+      investigationStatus
+      userStatus
       dataSources
       verdict
       verdictReasoning
@@ -299,7 +299,7 @@ query GetIncidents(
         stepConclusion
         cells { cellName query queryId }
       }
-      labels { name color }
+      labels { id categoryId name color usageCount }
       skills { id name version }
       link
       href
@@ -369,7 +369,8 @@ mutation UpdateIncidents($input: UpdateIncidentsInput!) {
     incidents {
       incidentId
       incidentName
-      status
+      investigationStatus
+      userStatus
       assignee { userId displayName email }
       assignees { userId displayName email }
       verdict
@@ -381,7 +382,8 @@ mutation UpdateIncidents($input: UpdateIncidentsInput!) {
 }
 """.strip()
 
-# Close-sync only sets status. Selection is id/status plus errors.
+# Close-sync only sets alert status / incident userStatus. Selection is
+# identifiers plus those fields and errors.
 UPDATE_ALERTS_STATUS_MUTATION = """
 mutation UpdateAlertsStatus($input: UpdateAlertsInput!) {
   updateAlerts(input: $input) {
@@ -394,7 +396,7 @@ mutation UpdateAlertsStatus($input: UpdateAlertsInput!) {
 UPDATE_INCIDENTS_STATUS_MUTATION = """
 mutation UpdateIncidentsStatus($input: UpdateIncidentsInput!) {
   updateIncidents(input: $input) {
-    incidents { incidentId status }
+    incidents { incidentId investigationStatus userStatus }
     errors { code message }
   }
 }

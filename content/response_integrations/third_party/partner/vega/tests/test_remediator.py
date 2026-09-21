@@ -39,7 +39,11 @@ class FakeManager:
 
     def resolve_incidents(self, incident_ids):
         self.resolved_incidents.append(list(incident_ids))
-        return {"incidents": [{"incidentId": item, "status": "RESOLVED"} for item in incident_ids]}
+        return {
+            "incidents": [
+                {"incidentId": item, "userStatus": "RESOLVED"} for item in incident_ids
+            ]
+        }
 
     def resolve_alerts(self, alert_ids):
         self.resolved_alerts.append(list(alert_ids))

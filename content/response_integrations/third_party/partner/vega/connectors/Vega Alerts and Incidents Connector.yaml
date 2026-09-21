@@ -47,7 +47,7 @@ parameters:
     is_advanced: false
     mode: script
 -   name: Backfill Days
-    default_value: '365'
+    default_value: '30'
     type: string
     description: Days to backfill on the first run only. Enter an integer from 0 to
         365 (0 starts from today). Invalid values cause a configuration error.
@@ -63,7 +63,7 @@ parameters:
     is_advanced: true
     mode: script
 -   name: Alert Statuses to Fetch
-    default_value: IN PROGRESS
+    default_value: OPEN, IN PROGRESS, PEER REVIEW, RESOLVED
     type: string
     description: 'Possible Values: OPEN, IN PROGRESS, PEER REVIEW, RESOLVED. Empty
         = all. Unsupported values cause a configuration error.'
@@ -98,18 +98,24 @@ parameters:
     is_mandatory: false
     is_advanced: true
     mode: script
--   name: Incident Statuses to Fetch
-    default_value: NEW,INVESTIGATING,ON HOLD,EXTERNAL ESCALATION,RESOLVED,REOPENED,REVIEW
-        RECOMMENDED,RESPONSE REQUIRED,UNDER REVIEW
+-   name: Incident User Statuses to Fetch
+    default_value: OPEN,IN REVIEW,ON HOLD,RESOLVED
     type: string
-    description: 'Possible Values: NEW, INVESTIGATING, ON HOLD, EXTERNAL ESCALATION,
-        RESOLVED, REOPENED, REVIEW RECOMMENDED, RESPONSE REQUIRED, UNDER REVIEW. Empty
+    description: 'Possible Values: OPEN, IN REVIEW, ON HOLD, RESOLVED. Empty
+        = all. Unsupported values cause a configuration error.'
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: Incident Investigation Statuses to Fetch
+    default_value: NEW,INVESTIGATING,COMPLETED,FAILED
+    type: string
+    description: 'Possible Values: NEW, INVESTIGATING, COMPLETED, FAILED. Empty
         = all. Unsupported values cause a configuration error.'
     is_mandatory: false
     is_advanced: true
     mode: script
 -   name: Incident Verdicts to Fetch
-    default_value: INCONCLUSIVE
+    default_value: MALICIOUS, SUSPICIOUS, BENIGN, INCONCLUSIVE, NA
     type: string
     description: 'Possible Values: MALICIOUS, SUSPICIOUS, BENIGN, INCONCLUSIVE, NA.
         Empty = all. Unsupported values cause a configuration error.'
@@ -119,13 +125,14 @@ parameters:
 -   name: Sync Case Close to Vega
     default_value: 'true'
     type: boolean
-    description: When true, closing a SOAR case sets Vega status to RESOLVED on the
-        next connector run. Only cases that are actually closed in SecOps are
-        synced. Creating or updating a case during ingest does not resolve Vega.
-        The first run after enable only sets a baseline and does not send
-        historical closes. An incident-only case resolves that Vega incident. A
-        related-alert batch or unrelated alert case resolves those Vega alerts.
-        Closing related-alert batches does not resolve the Vega incident.
+    description: When true, closing a SOAR case sets Vega alert status or incident
+        user status to RESOLVED on the next connector run. Only cases that are
+        actually closed in SecOps are synced. Creating or updating a case during
+        ingest does not resolve Vega. The first run after enable only sets a
+        baseline and does not send historical closes. An incident-only case
+        resolves that Vega incident. A related-alert batch or unrelated alert
+        case resolves those Vega alerts. Closing related-alert batches does not
+        resolve the Vega incident.
     is_mandatory: false
     is_advanced: true
     mode: script
@@ -148,8 +155,10 @@ parameters:
     type: string
     description: Max seconds for one connector run before SecOps kills the Python
         process. This is not the schedule. Use Run Every to control how often a run
-        starts. The connector stops before this limit, saves a timestamp watermark,
-        and the next run continues from that point so alert events are not dropped.
+        starts. The connector stops before this limit, packages what it fetched,
+        and saves the last packaged record timestamp as the watermark. The next
+        run continues from that watermark so remaining incidents, alerts, and
+        events are not skipped.
     is_mandatory: true
     is_advanced: false
     mode: regular

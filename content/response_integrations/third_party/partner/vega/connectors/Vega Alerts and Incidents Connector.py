@@ -11,7 +11,7 @@ Vega Alerts and Incidents Connector.
    - Alerts+No: one case per unrelated Vega alert.
    Each packaged record is a SOAR alert inside its case.
 3. Packager turns records into SOAR AlertInfo objects. Optional outbound
-   sync sets Vega status to RESOLVED when the matching SOAR case closes
+   sync sets Vega userStatus to RESOLVED when the matching SOAR case closes
    (incident case → incident only; alert/batch case → those alerts only).
 """
 from __future__ import annotations
@@ -102,8 +102,9 @@ def _read_params(siemplify) -> dict:
         PARAM_BACKFILL,
         PARAM_ENTITIES,
         PARAM_HAS_RELATED,
+        PARAM_INCIDENT_INVESTIGATION_STATUSES,
         PARAM_INCIDENT_SEVERITIES,
-        PARAM_INCIDENT_STATUSES,
+        PARAM_INCIDENT_USER_STATUSES,
         PARAM_INCIDENT_VERDICTS,
         PARAM_LOOKBACK,
         PARAM_PYTHON_TIMEOUT,
@@ -139,8 +140,11 @@ def _read_params(siemplify) -> dict:
         "incident_severities": siemplify.extract_connector_param(
             param_name=PARAM_INCIDENT_SEVERITIES, default_value=""
         ),
-        "incident_statuses": siemplify.extract_connector_param(
-            param_name=PARAM_INCIDENT_STATUSES, default_value=""
+        "incident_user_statuses": siemplify.extract_connector_param(
+            param_name=PARAM_INCIDENT_USER_STATUSES, default_value=""
+        ),
+        "incident_investigation_statuses": siemplify.extract_connector_param(
+            param_name=PARAM_INCIDENT_INVESTIGATION_STATUSES, default_value=""
         ),
         "incident_verdicts": siemplify.extract_connector_param(
             param_name=PARAM_INCIDENT_VERDICTS, default_value=""
@@ -170,7 +174,8 @@ def _validate_params(params: dict) -> None:
         alert_verdicts=params["alert_verdicts"],
         has_related=params["has_related"],
         incident_severities=params["incident_severities"],
-        incident_statuses=params["incident_statuses"],
+        incident_user_statuses=params["incident_user_statuses"],
+        incident_investigation_statuses=params["incident_investigation_statuses"],
         incident_verdicts=params["incident_verdicts"],
         python_timeout=params["python_timeout"],
     )
@@ -197,7 +202,8 @@ def _build_manager_and_pipeline(siemplify, params):
         alert_verdicts=params["alert_verdicts"],
         has_related=params["has_related"],
         incident_severities=params["incident_severities"],
-        incident_statuses=params["incident_statuses"],
+        incident_user_statuses=params["incident_user_statuses"],
+        incident_investigation_statuses=params["incident_investigation_statuses"],
         incident_verdicts=params["incident_verdicts"],
         max_fetch=TEST_RUN_MAX_FETCH if params.get("is_test_run") else None,
         logger_instance=siemplify.LOGGER,

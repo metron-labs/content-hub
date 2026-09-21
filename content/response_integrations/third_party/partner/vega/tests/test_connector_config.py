@@ -1,8 +1,10 @@
 import pytest
 
+from core.constants import GRAPHQL_PAGE_SIZE
 from core.exceptions import VegaValidationException
 from core.utils import (
     format_test_connection_summary,
+    resolve_incident_filters,
     validate_connector_fields,
 )
 from core.VegaManager import VegaManager
@@ -26,7 +28,8 @@ def _valid_kwargs(**overrides):
         "alert_verdicts": "",
         "has_related": "Yes,No",
         "incident_severities": "",
-        "incident_statuses": "",
+        "incident_user_statuses": "",
+        "incident_investigation_statuses": "",
         "incident_verdicts": "",
         "python_timeout": "930",
     }
@@ -137,3 +140,82 @@ def test_get_incident_uses_uuid_or_vega_id_not_both() -> None:
     calls.clear()
     assert manager.get_incident("VINC-1")["id"] == "inc-1"
     assert calls == [{"vegaIncidentIds": ["VINC-1"]}]
+
+
+def test_resolve_incident_filters_maps_user_and_investigation_status() -> None:
+    filters = resolve_incident_filters(
+        {
+            "incident_user_statuses": "OPEN, IN REVIEW",
+            "incident_investigation_statuses": "NEW,INVESTIGATING",
+        }
+    )
+    assert filters["user_statuses"] == ["OPEN", "IN_REVIEW"]
+    assert filters["investigation_statuses"] == ["NEW", "INVESTIGATING"]
+
+
+def test_validate_rejects_swapped_incident_status_values() -> None:
+    with pytest.raises(VegaValidationException) as exc:
+        validate_connector_fields(
+            **_valid_kwargs(
+                incident_user_statuses="NEW",
+                incident_investigation_statuses="ON HOLD",
+            )
+        )
+    text = str(exc.value)
+    assert "Incident User Statuses to Fetch" in text
+    assert "Incident Investigation Statuses to Fetch" in text
+
+
+def test_resolve_incidents_sends_user_status() -> None:
+    manager = VegaManager(
+        api_root="https://api.vega.io",
+        access_key_id="kid",
+        access_key="secret",
+        session=DummySession(),
+        sleeper=lambda _seconds: None,
+    )
+    captured: list[dict] = []
+
+    def _graphql(query, variables=None):
+        captured.append({"query": query, "variables": dict(variables or {})})
+        return {"updateIncidents": {"incidents": [{"incidentId": "inc-1"}]}}
+
+    manager.graphql = _graphql
+    manager.resolve_incidents(["inc-1"])
+    assert captured[0]["variables"]["input"] == {
+        "incidentIds": ["inc-1"],
+        "userStatus": "RESOLVED",
+    }
+    assert "userStatus" in captured[0]["query"]
+    assert "status" not in captured[0]["variables"]["input"]
+
+
+def test_get_incidents_stops_paging_when_deadline_passes() -> None:
+    manager = VegaManager(
+        api_root="https://api.vega.io",
+        access_key_id="kid",
+        access_key="secret",
+        session=DummySession(),
+        sleeper=lambda _seconds: None,
+    )
+    manager._jwt = "token"
+    calls: list[dict] = []
+
+    def _graphql(_query, variables=None):
+        variables = dict(variables or {})
+        calls.append(variables)
+        limit = int(variables.get("limit") or GRAPHQL_PAGE_SIZE)
+        offset = int(variables.get("offset") or 0)
+        return {
+            "getIncidents": {
+                "incidents": [{"id": f"i-{offset + index}"} for index in range(limit)],
+                "total": GRAPHQL_PAGE_SIZE * 4,
+                "limit": limit,
+            }
+        }
+
+    manager.graphql = _graphql
+    records = manager.get_incidents({}, deadline_monotonic=0)
+    assert len(records) == GRAPHQL_PAGE_SIZE
+    assert manager.last_fetch_truncated is True
+    assert len(calls) == 1

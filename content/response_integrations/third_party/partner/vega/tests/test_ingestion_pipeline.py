@@ -1,6 +1,8 @@
 """Tests for incident-case vs unrelated-alert ingestion."""
 from __future__ import annotations
 
+import time
+
 from core.constants import (
     ENTITY_TYPE_ALERT,
     ENTITY_TYPE_INCIDENT,
@@ -22,15 +24,16 @@ class FakeManager:
         self.incident_calls: list[dict] = []
         self.event_calls: list[str] = []
         self.timeline_calls: list[str] = []
+        self.last_fetch_truncated = False
 
-    def get_incidents(self, variables, max_records=None):
+    def get_incidents(self, variables, max_records=None, deadline_monotonic=None, **_kwargs):
         self.incident_calls.append(dict(variables or {}))
         rows = list(self.incidents)
         if max_records is not None:
             return rows[:max_records]
         return rows
 
-    def get_alerts(self, variables, max_records=None):
+    def get_alerts(self, variables, max_records=None, deadline_monotonic=None, **_kwargs):
         variables = dict(variables or {})
         self.alert_calls.append(variables)
         alert_ids = {str(item) for item in (variables.get("alertIds") or []) if item}
@@ -65,11 +68,15 @@ class FakeManager:
     def count_incidents(self, variables):
         return len(self.get_incidents(variables))
 
-    def get_all_alert_events(self, alert_id, page_size=None, max_records=None):
+    def get_all_alert_events(
+        self, alert_id, page_size=None, max_records=None, deadline_monotonic=None, **_kwargs
+    ):
         self.event_calls.append(alert_id)
         return list(self.alert_events.get(alert_id) or [])
 
-    def get_all_incident_timeline(self, incident_id):
+    def get_all_incident_timeline(
+        self, incident_id, page_size=None, deadline_monotonic=None, **_kwargs
+    ):
         self.timeline_calls.append(incident_id)
         return list(self.timelines.get(incident_id) or [])
 
@@ -347,6 +354,25 @@ def test_incidents_only_skips_related_and_unrelated_alerts() -> None:
         assert manager.incident_calls
 
 
+def test_incident_query_uses_user_and_investigation_status_filters() -> None:
+    manager = _sample_manager()
+    pipeline = IngestionPipeline(
+        manager=manager,
+        entities_raw="Incidents",
+        lookback_minutes="5",
+        backfill_days="0",
+        incident_user_statuses="OPEN, IN REVIEW",
+        incident_investigation_statuses="NEW",
+        max_fetch=20,
+    )
+    pipeline.run()
+    assert manager.incident_calls
+    call = manager.incident_calls[0]
+    assert call["userStatuses"] == ["OPEN", "IN_REVIEW"]
+    assert call["investigationStatuses"] == ["NEW"]
+    assert "statuses" not in call
+
+
 def test_alerts_yes_no_creates_standalone_related_and_unrelated() -> None:
     manager = _sample_manager()
     summary = _pipeline(manager, entities="Alerts", has_related="Yes,No").run()
@@ -570,11 +596,11 @@ def test_related_alert_lookup_does_not_send_vega_ids_as_graphql_ids() -> None:
     uuid = "019e1b27-5119-7822-bde3-344b13e481cf"
 
     class StrictManager(FakeManager):
-        def get_alerts(self, variables, max_records=None):
+        def get_alerts(self, variables, max_records=None, **kwargs):
             alert_ids = [str(item) for item in (variables.get("alertIds") or []) if item]
             if any(not item.count("-") == 4 for item in alert_ids):
                 raise RuntimeError(f"alertIds must be UUIDs, got {alert_ids}")
-            return super().get_alerts(variables, max_records)
+            return super().get_alerts(variables, max_records, **kwargs)
 
     manager = StrictManager()
     manager.incidents = [
@@ -611,7 +637,7 @@ def test_related_alert_labels_survive_when_uuid_lookup_fails() -> None:
     uuid = "019e1b27-5119-7822-bde3-344b13e481cf"
 
     class UuidLookupFails(FakeManager):
-        def get_alerts(self, variables, max_records=None):
+        def get_alerts(self, variables, max_records=None, **kwargs):
             if variables.get("alertIds"):
                 raise RuntimeError("getAlerts(alertIds) rejected mixed IDs")
             vega_ids = {str(item) for item in (variables.get("vegaAlertIds") or []) if item}
@@ -625,7 +651,7 @@ def test_related_alert_labels_survive_when_uuid_lookup_fails() -> None:
                 if max_records is not None:
                     return rows[:max_records]
                 return rows
-            return super().get_alerts(variables, max_records)
+            return super().get_alerts(variables, max_records, **kwargs)
 
     manager = UuidLookupFails()
     manager.incidents = [
@@ -668,10 +694,10 @@ def test_related_alerts_are_not_ingested_twice_when_both_entities_selected() -> 
 
 def test_unrelated_fetch_failure_still_emits_incident_cases() -> None:
     class BoomManager(FakeManager):
-        def get_alerts(self, variables, max_records=None):
+        def get_alerts(self, variables, max_records=None, **kwargs):
             if variables.get("hasRelatedIncidents") is False:
                 raise RuntimeError("getAlerts boom")
-            return super().get_alerts(variables, max_records)
+            return super().get_alerts(variables, max_records, **kwargs)
 
     manager = BoomManager()
     manager.incidents = [
@@ -681,6 +707,7 @@ def test_unrelated_fetch_failure_still_emits_incident_cases() -> None:
     summary = _pipeline(manager, has_related="Yes,No").run()
     ids = [record.get("id") for _, record in summary["records"]]
     assert ids == ["inc-1", "alert-1"]
+    assert summary["incomplete"] is True
 
 
 def test_checkpoint_skips_already_ingested_records() -> None:
@@ -726,12 +753,12 @@ def test_related_alert_name_uses_vega_alert_id_not_uuid() -> None:
 
 def test_alert_id_lookup_falls_back_to_related_window_query() -> None:
     class EmptyIdManager(FakeManager):
-        def get_alerts(self, variables, max_records=None):
+        def get_alerts(self, variables, max_records=None, **kwargs):
             variables = dict(variables or {})
             if variables.get("alertIds") or variables.get("vegaAlertIds"):
                 self.alert_calls.append(variables)
                 return []
-            return super().get_alerts(variables, max_records)
+            return super().get_alerts(variables, max_records, **kwargs)
 
     manager = EmptyIdManager()
     manager.incidents = [
@@ -764,9 +791,9 @@ def test_every_related_alert_fetches_events() -> None:
     calls = {"n": 0}
     original = manager.get_all_alert_events
 
-    def _counted(alert_id):
+    def _counted(alert_id, **kwargs):
         calls["n"] += 1
-        return original(alert_id)
+        return original(alert_id, **kwargs)
 
     manager.get_all_alert_events = _counted
     summary = _pipeline(
@@ -815,9 +842,19 @@ def test_timeout_saves_watermark_and_next_run_continues() -> None:
         "alert-1": [{"name": "e1"}],
         "alert-2": [{"name": "e2"}],
     }
-    first = _pipeline(
+    pipeline = _pipeline(
         manager, entities="Alerts,Incidents", has_related="Yes", max_fetch=20
-    ).run(deadline_monotonic=0)
+    )
+    original_append = pipeline._append_incident_alert
+
+    def _append_then_expire(*args, **kwargs):
+        added = original_append(*args, **kwargs)
+        if added:
+            pipeline._deadline = 0
+        return added
+
+    pipeline._append_incident_alert = _append_then_expire
+    first = pipeline.run(deadline_monotonic=time.monotonic() + 60)
     assert first["incomplete"] is True
     assert [kind for kind, _ in first["records"]] == [ENTITY_TYPE_INCIDENT]
     assert first["checkpoint"]["watermark"] == "2026-01-01T00:00:00Z"
@@ -857,6 +894,155 @@ def test_incomplete_created_window_keeps_createdat_filters() -> None:
     assert window["query_mode"] == "created"
     assert window["from"] is not None
     assert window["updated_from"] is None
+    assert window["origin_from"] == window["from"]
+
+
+def test_poisoned_checkpoint_rescans_created_backfill_not_updatedat() -> None:
+    from datetime import datetime, timezone
+
+    from core.utils import compute_time_window
+
+    now = datetime(2026, 9, 18, 8, 30, 14, tzinfo=timezone.utc)
+    window = compute_time_window(
+        {
+            "watermark": "2026-09-18T08:30:14Z",
+            "incomplete": False,
+            "query_mode": "updated",
+            "ingested_ids": ["incident:inc-1"],
+        },
+        backfill_days=365,
+        lookback_minutes=5,
+        now=now,
+    )
+    assert window["query_mode"] == "created"
+    assert window["updated_from"] is None
+    assert window["from"] == "2025-09-18T08:25:14Z"
+    assert window["to"] == "2026-09-18T08:30:14Z"
+
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "name": "Already ingested",
+            "createdAt": "2026-01-01T00:00:00Z",
+        },
+        {
+            "id": "inc-2",
+            "name": "Pending",
+            "createdAt": "2026-02-01T00:00:00Z",
+        },
+    ]
+    summary = _pipeline(manager, entities="Incidents").run(
+        checkpoint={
+            "watermark": "2026-09-18T08:30:14Z",
+            "incomplete": False,
+            "query_mode": "updated",
+            "ingested_ids": ["incident:inc-1"],
+        }
+    )
+    assert [record.get("id") for _, record in summary["records"]] == ["inc-2"]
+    assert "from" in manager.incident_calls[0]
+    assert "updatedFrom" not in manager.incident_calls[0]
+    assert summary["checkpoint"]["origin_from"]
+
+
+def test_caught_up_checkpoint_uses_updatedat_window() -> None:
+    from datetime import datetime, timezone
+
+    from core.utils import compute_time_window
+
+    now = datetime(2026, 9, 18, 8, 30, 14, tzinfo=timezone.utc)
+    window = compute_time_window(
+        {
+            "watermark": "2026-09-18T08:30:14Z",
+            "incomplete": False,
+            "query_mode": "updated",
+            "origin_from": "2025-09-18T08:25:14Z",
+            "ingested_ids": ["incident:inc-1"],
+        },
+        backfill_days=365,
+        lookback_minutes=5,
+        now=now,
+    )
+    assert window["query_mode"] == "updated"
+    assert window["from"] is None
+    assert window["updated_from"] == "2026-09-18T08:25:14Z"
+
+
+def test_timeout_with_zero_packaged_keeps_previous_watermark() -> None:
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "createdAt": "2026-01-02T00:00:00Z",
+            "lastUpdated": "2026-01-02T00:00:00Z",
+        }
+    ]
+    checkpoint = {
+        "watermark": "2026-01-01T00:00:00Z",
+        "incomplete": True,
+        "query_mode": "created",
+        "ingested_ids": ["incident:inc-old"],
+    }
+    summary = _pipeline(manager, entities="Incidents").run(
+        checkpoint=checkpoint, deadline_monotonic=0
+    )
+    assert summary["fetched"] == 0
+    assert summary["incomplete"] is True
+    assert summary["checkpoint"]["watermark"] == "2026-01-01T00:00:00Z"
+    assert summary["checkpoint"]["incomplete"] is True
+    assert summary["checkpoint"]["query_mode"] == "created"
+    assert not manager.incident_calls
+
+
+def test_fetch_error_keeps_previous_watermark() -> None:
+    class BoomIncidents(FakeManager):
+        def get_incidents(self, variables, max_records=None, **_kwargs):
+            raise RuntimeError("getIncidents boom")
+
+    checkpoint = {
+        "watermark": "2026-01-01T00:00:00Z",
+        "incomplete": True,
+        "query_mode": "created",
+        "ingested_ids": [],
+    }
+    summary = _pipeline(BoomIncidents(), entities="Incidents").run(checkpoint=checkpoint)
+    assert summary["fetched"] == 0
+    assert summary["incomplete"] is True
+    assert summary["checkpoint"]["watermark"] == "2026-01-01T00:00:00Z"
+    assert summary["checkpoint"]["query_mode"] == "created"
+
+
+def test_truncated_fetch_stays_incomplete_after_packaging_returned_rows() -> None:
+    class TruncatedManager(FakeManager):
+        def get_incidents(self, variables, max_records=None, **_kwargs):
+            self.incident_calls.append(dict(variables or {}))
+            self.last_fetch_truncated = True
+            return list(self.incidents[:1])
+
+    manager = TruncatedManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "name": "Older",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "lastUpdated": "2026-01-01T00:00:00Z",
+        },
+        {
+            "id": "inc-2",
+            "name": "Newer",
+            "createdAt": "2026-06-01T00:00:00Z",
+            "lastUpdated": "2026-06-01T00:00:00Z",
+        },
+    ]
+    summary = _pipeline(manager, entities="Incidents", max_fetch=20).run()
+    assert [record.get("id") for _, record in summary["records"]] == ["inc-1"]
+    assert summary["incomplete"] is True
+    assert summary["checkpoint"]["watermark"] == "2026-01-01T00:00:00Z"
+    assert summary["checkpoint"]["incomplete"] is True
+    assert summary["checkpoint"]["query_mode"] == "created"
+    assert summary["checkpoint"]["watermark"] != summary["window"]["end"]
 
 
 def test_preview_counts_and_samples_without_enrichment() -> None:
