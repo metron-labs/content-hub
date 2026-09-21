@@ -638,12 +638,25 @@ def test_child_event_overwrites_invalid_payload_times() -> None:
     )
     assert event["StartTime"] == 1_700_000_000_000
     assert event["EndTime"] == 1_700_000_000_000
-    assert event["start_time"] == 1_700_000_000_000
-    assert event["end_time"] == 1_700_000_000_000
+    assert "start_time" not in event
+    assert "end_time" not in event
     assert "starttime" not in event
     assert "Time" not in event
     assert "_time" not in event
     assert "timestamp" not in event
+
+
+def test_parent_event_keeps_single_start_and_end_time() -> None:
+    event = build_event_dict(
+        {"id": "inc-1", "vegaUniqueIncidentId": "INC-1", "name": "Campaign"},
+        ENTITY_TYPE_INCIDENT,
+        1_700_000_000_000,
+        1_700_000_000_000,
+    )
+    assert event["StartTime"] == 1_700_000_000_000
+    assert event["EndTime"] == 1_700_000_000_000
+    assert "start_time" not in event
+    assert "end_time" not in event
 
 
 def test_extract_sync_targets_incident_case_ignores_related_alerts() -> None:

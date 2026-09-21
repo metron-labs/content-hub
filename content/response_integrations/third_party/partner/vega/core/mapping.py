@@ -30,6 +30,8 @@ _SKIP_PAYLOAD_KEYS = {
     "details",
     "StartTime",
     "EndTime",
+    "start_time",
+    "end_time",
     "name",
     "device_vendor",
     "device_product",
@@ -182,8 +184,8 @@ def case_display_name(record: dict, entity_type: str) -> str:
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} TEST 01"
-    return f"Vega {entity_type} - {name} TEST 02"
+        return f"Vega {entity_type} - {display_id} - {name}"
+    return f"Vega {entity_type} - {name}"
 
 
 def incident_case_title(record: dict, related_batch: int = 0) -> str:
@@ -591,11 +593,11 @@ def _is_skipped_payload_key(key: Any) -> bool:
 
 
 def _apply_event_times(event: dict, start_time: int, end_time: int) -> None:
-    """Force ontology StartTime/EndTime after payload mapping so Vega times cannot win."""
+    """Keep a single StartTime/EndTime pair so SecOps does not repeat dates."""
     event["StartTime"] = start_time
     event["EndTime"] = end_time
-    event["start_time"] = start_time
-    event["end_time"] = end_time
+    event.pop("start_time", None)
+    event.pop("end_time", None)
 
 
 def _soar_value(value: Any, *, limit: int = _MAX_EVENT_FIELD_CHARS) -> str:
@@ -786,8 +788,6 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
     event = {
         "StartTime": start_time,
         "EndTime": end_time,
-        "start_time": start_time,
-        "end_time": end_time,
         "name": case_display_name(record, entity_type),
         "device_vendor": VENDOR_NAME,
         "device_product": DEVICE_PRODUCT,
@@ -1001,8 +1001,6 @@ def build_vega_alert_event_dict(
     event = {
         "StartTime": start_time,
         "EndTime": end_time,
-        "start_time": start_time,
-        "end_time": end_time,
         "name": name,
         "device_vendor": VENDOR_NAME,
         "device_product": DEVICE_PRODUCT,
