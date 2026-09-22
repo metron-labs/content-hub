@@ -78,8 +78,15 @@
 - description: 'Bug Fix: v2 Ping and playbook actions reuse a cached OAuth token
     instead of minting a new token on every run. This avoids the /oauth/token 5
     requests per hour rate limit.'
-  version: 8.4
+  version: 9.0
   item_name: DoppelVision
   item_type: Integration
   publish_time: '2026-09-21'
+  ticket_number: ''
+- description: 'Removed the Create Abuse Alert action because the corresponding Doppel
+    platform endpoint is no longer available.'
+  version: 10.0
+  item_name: DoppelVision
+  item_type: Integration
+  publish_time: '2026-09-22'
   ticket_number: ''

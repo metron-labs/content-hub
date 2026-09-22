@@ -162,17 +162,6 @@ class DoppelManager:
             raise ValueError("Empty response or update failed.")
         return payload
 
-    def create_abuse_alert(self, entity: str) -> dict[str, Any]:
-        """Creates an abuse alert for a given entity in Doppel."""
-        payload = self.http_client.request(
-            "POST",
-            f"{self.base_url}/alert/abuse",
-            json_body={"entity": entity},
-        )
-        if not payload:
-            raise ValueError("Failed to create abuse alert or empty response.")
-        return payload
-
     def normalize_alert(self, raw_alert: Any) -> dict[str, Any] | None:
         return normalize_alert(raw_alert)
 

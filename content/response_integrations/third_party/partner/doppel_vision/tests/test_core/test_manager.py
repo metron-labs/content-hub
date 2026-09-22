@@ -105,16 +105,6 @@ def test_update_alert_sends_comment_not_notes(version: str) -> None:
     assert "notes" not in body
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
-def test_create_abuse_alert_uses_versioned_path(version: str) -> None:
-    session = MagicMock()
-    manager = _manager(version, session)
-    session.request.return_value = FakeResponse(200, {"message": "ok"})
-    result = manager.create_abuse_alert("https://abuse.test")
-    assert result["message"] == "ok"
-    assert session.request.call_args.kwargs["url"] == f"https://api.doppel.com/{version}/alert/abuse"
-
-
 def test_connection_test_uses_small_page() -> None:
     session = MagicMock()
     manager = _manager("v1", session)
