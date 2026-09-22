@@ -85,7 +85,7 @@
   ticket_number: ''
 - description: 'Removed the Create Abuse Alert action because the corresponding Doppel
     platform endpoint is no longer available.'
-  version: 10.0
+  version: 9.4
   item_name: DoppelVision
   item_type: Integration
   publish_time: '2026-09-22'

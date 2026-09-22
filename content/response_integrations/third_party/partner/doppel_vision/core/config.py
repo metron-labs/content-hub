@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import io
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
-import io
 from typing import Any
 
 from .auth_provider_v1 import AuthProviderV1

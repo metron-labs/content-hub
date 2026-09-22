@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import time
+from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 
 from .constants import (
