@@ -42,6 +42,11 @@ def main():
         input_type=str,
         default_value=0,
     )
+    page_size = siemplify.extract_action_param(
+        param_name="Page Size",
+        input_type=str,
+        default_value="30",
+    )
     tags = siemplify.extract_action_param(param_name="Tags", default_value=None)
 
     tags_list = tags.split(",") if tags else None
@@ -55,6 +60,7 @@ def main():
         "sort_type": sort_type,
         "sort_order": sort_order,
         "page": page,
+        "page_size": page_size,
         "tags": tags_list,
     }
     filters = {key: value for key, value in filters.items() if value is not None}

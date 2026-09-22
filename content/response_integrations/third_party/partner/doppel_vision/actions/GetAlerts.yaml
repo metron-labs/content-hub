@@ -58,6 +58,11 @@ parameters:
     is_mandatory: false
     name: Page
     type: string
+-   default_value: 30
+    description: Number of alerts per page. Must be between 1 and 200; defaults to 30.
+    is_mandatory: false
+    name: Page Size
+    type: string
 -   default_value: ''
     description: New queue status to update alert with (id required)
     is_mandatory: false
