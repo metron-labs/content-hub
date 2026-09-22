@@ -13,21 +13,22 @@ from .exceptions import DoppelHttpError
 AuthProvider = AuthProviderV1 | AuthProviderV2
 
 
-def _error_message(status_code: int, payload: Any, auth_error_message: str) -> str:
+def _error_message(status_code: int, payload: Any, auth_error_message: str, url: str) -> str:
     api_message = None
     if isinstance(payload, dict):
         api_message = payload.get("message") or payload.get("error")
+    detail = str(api_message) if api_message else auth_error_message
     if status_code == 401:
-        return str(api_message) if api_message else auth_error_message
+        return f"{url} failed (HTTP 401): {detail}"
     if status_code == 403:
-        return str(api_message) if api_message else "Forbidden"
+        return f"{url} failed (HTTP 403): {detail if api_message else 'Forbidden'}"
     if status_code == 404:
-        return str(api_message) if api_message else "Not found"
+        return f"{url} failed (HTTP 404): {detail if api_message else 'Not found'}"
     if status_code == 429:
-        return str(api_message) if api_message else "Rate limit exceeded"
+        return f"{url} failed (HTTP 429): {detail if api_message else 'Rate limit exceeded'}"
     if status_code >= 500:
-        return str(api_message) if api_message else f"Doppel API server error ({status_code})"
-    return str(api_message) if api_message else f"Doppel API request failed with status {status_code}"
+        return f"{url} failed (HTTP {status_code}): {detail if api_message else 'Doppel API server error'}"
+    return f"{url} failed (HTTP {status_code}): {detail if api_message else 'Doppel API request failed'}"
 
 
 def _retry_after_seconds(response: requests.Response) -> float:
@@ -113,7 +114,7 @@ class HttpClient:
             if not response.ok:
                 raise DoppelHttpError(
                     response.status_code,
-                    _error_message(response.status_code, payload, self._auth_error_message),
+                    _error_message(response.status_code, payload, self._auth_error_message, url),
                 )
             return payload if payload != {} or response.content else {}
 

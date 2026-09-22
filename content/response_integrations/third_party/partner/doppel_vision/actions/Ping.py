@@ -18,12 +18,18 @@ def main():
         siemplify.end(
             f"Successfully connected to the Doppel Vision server using API "
             f"{doppel_manager.api_version} with the provided connection parameters!",
-            "true",
+            True,
         )
     except DoppelError as e:
-        siemplify.end(f"Failed to connect to the Doppel Vision server: {e}", "false")
+        siemplify.end(
+            f"Failed to connect to the Doppel Vision server: {e}",
+            False,
+        )
     except Exception as e:
-        siemplify.end(f"Failed to connect to the Doppel Vision server: {e!s}", "false")
+        siemplify.end(
+            f"Failed to connect to the Doppel Vision server: {e!s}",
+            False,
+        )
 
 
 if __name__ == "__main__":

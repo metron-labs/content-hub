@@ -84,7 +84,7 @@ def test_v2_oauth_error_does_not_include_secret() -> None:
         json=lambda: {"error": "access_denied", "error_description": "Unauthorized"},
     )
     provider = AuthProviderV2("id", "secret", token_cache=TokenCache(), session=session)
-    with pytest.raises(DoppelHttpError, match="Unauthorized") as exc_info:
+    with pytest.raises(DoppelHttpError, match="OAuth token request failed") as exc_info:
         provider.get_auth_headers()
     assert "secret" not in str(exc_info.value)
 

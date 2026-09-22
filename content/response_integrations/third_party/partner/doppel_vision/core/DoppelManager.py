@@ -42,9 +42,16 @@ class DoppelManager:
         siemplify: Any | None = None,
         session: requests.Session | None = None,
         sleep: Any | None = None,
+        persist_token: bool = True,
     ) -> DoppelManager:
         manager = cls.__new__(cls)
-        manager._init_from_config(config, siemplify=siemplify, session=session, sleep=sleep)
+        manager._init_from_config(
+            config,
+            siemplify=siemplify,
+            session=session,
+            sleep=sleep,
+            persist_token=persist_token,
+        )
         return manager
 
     def _init_from_config(
@@ -53,6 +60,7 @@ class DoppelManager:
         siemplify: Any | None = None,
         session: requests.Session | None = None,
         sleep: Any | None = None,
+        persist_token: bool = True,
     ) -> None:
         self.api_version = config.api_version
         self.api_key = config.api_key
@@ -62,7 +70,12 @@ class DoppelManager:
         self.client_secret = config.client_secret
         self.base_url = f"{API_HOST}/{config.api_version}"
         session = session or requests.Session()
-        self.auth_provider = create_auth_provider(config, siemplify=siemplify, session=session)
+        self.auth_provider = create_auth_provider(
+            config,
+            siemplify=siemplify,
+            session=session,
+            persist_token=persist_token,
+        )
         self.http_client = HttpClient(
             auth_provider=self.auth_provider,
             session=session,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+import io
 from typing import Any
 
 from .auth_provider_v1 import AuthProviderV1
@@ -57,6 +59,16 @@ def resolve_api_version(raw_value: Any) -> str:
     )
 
 
+_PARAM_NAMES = (
+    PARAM_API_VERSION,
+    PARAM_API_KEY,
+    PARAM_USER_API_KEY,
+    PARAM_ORG_CODE,
+    PARAM_CLIENT_ID,
+    PARAM_CLIENT_SECRET,
+)
+
+
 def validate_config(config: IntegrationConfig) -> IntegrationConfig:
     if config.api_version == API_VERSION_V2:
         if not config.client_id or not config.client_secret:
@@ -67,45 +79,57 @@ def validate_config(config: IntegrationConfig) -> IntegrationConfig:
     return config
 
 
+def _configuration_mapping(siemplify: Any) -> dict[str, Any] | None:
+    """Return the instance config dict without per-parameter extract logs.
+    The Siemplify SDK prints 'Reading configuration from Server' to stdout/stderr.
+    We silence stdout and stderr so that the SecOps UI displays real exception messages.
+    """
+    getter = getattr(siemplify, "get_configuration", None)
+    if not callable(getter):
+        return None
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf), redirect_stderr(buf):
+            configuration = getter(INTEGRATION_NAME)
+    except Exception:
+        return None
+    if isinstance(configuration, dict):
+        return configuration
+    return None
+
+
+def _extract_param(siemplify: Any, param_name: str) -> str | None:
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf), redirect_stderr(buf):
+            val = siemplify.extract_configuration_param(
+                provider_name=INTEGRATION_NAME,
+                param_name=param_name,
+                default_value="",
+                is_mandatory=False,
+                print_value=False,
+            )
+    except Exception:
+        val = ""
+    return _clean(val)
+
+
+def _read_params(siemplify: Any) -> dict[str, str | None]:
+    mapping = _configuration_mapping(siemplify)
+    if mapping is not None:
+        return {name: _clean(mapping.get(name)) for name in _PARAM_NAMES}
+    return {name: _extract_param(siemplify, name) for name in _PARAM_NAMES}
+
+
 def load_integration_config(siemplify: Any) -> IntegrationConfig:
-    api_version = resolve_api_version(
-        siemplify.extract_configuration_param(
-            provider_name=INTEGRATION_NAME,
-            param_name=PARAM_API_VERSION,
-        ),
-    )
+    params = _read_params(siemplify)
     config = IntegrationConfig(
-        api_version=api_version,
-        api_key=_clean(
-            siemplify.extract_configuration_param(
-                provider_name=INTEGRATION_NAME,
-                param_name=PARAM_API_KEY,
-            ),
-        ),
-        user_api_key=_clean(
-            siemplify.extract_configuration_param(
-                provider_name=INTEGRATION_NAME,
-                param_name=PARAM_USER_API_KEY,
-            ),
-        ),
-        org_code=_clean(
-            siemplify.extract_configuration_param(
-                provider_name=INTEGRATION_NAME,
-                param_name=PARAM_ORG_CODE,
-            ),
-        ),
-        client_id=_clean(
-            siemplify.extract_configuration_param(
-                provider_name=INTEGRATION_NAME,
-                param_name=PARAM_CLIENT_ID,
-            ),
-        ),
-        client_secret=_clean(
-            siemplify.extract_configuration_param(
-                provider_name=INTEGRATION_NAME,
-                param_name=PARAM_CLIENT_SECRET,
-            ),
-        ),
+        api_version=resolve_api_version(params[PARAM_API_VERSION]),
+        api_key=params[PARAM_API_KEY],
+        user_api_key=params[PARAM_USER_API_KEY],
+        org_code=params[PARAM_ORG_CODE],
+        client_id=params[PARAM_CLIENT_ID],
+        client_secret=params[PARAM_CLIENT_SECRET],
     )
     return validate_config(config)
 
@@ -114,12 +138,14 @@ def create_auth_provider(
     config: IntegrationConfig,
     siemplify: Any | None = None,
     session: Any | None = None,
+    *,
+    persist_token: bool = True,
 ) -> AuthProviderV1 | AuthProviderV2:
     if config.api_version == API_VERSION_V2:
         return AuthProviderV2(
             client_id=config.client_id or "",
             client_secret=config.client_secret or "",
-            token_cache=TokenCache(siemplify=siemplify),
+            token_cache=TokenCache(siemplify=siemplify, use_context=persist_token),
             session=session,
         )
     return AuthProviderV1(
@@ -129,11 +155,12 @@ def create_auth_provider(
     )
 
 
-def create_manager_from_siemplify(siemplify: Any):
+def create_manager_from_siemplify(siemplify: Any, *, persist_token: bool = True):
     from .DoppelManager import DoppelManager
 
     config = load_integration_config(siemplify)
-    logger = getattr(siemplify, "LOGGER", None)
-    if logger:
-        logger.info(f"Using Doppel API {config.api_version}")
-    return DoppelManager.from_config(config, siemplify=siemplify)
+    return DoppelManager.from_config(
+        config,
+        siemplify=siemplify,
+        persist_token=persist_token,
+    )

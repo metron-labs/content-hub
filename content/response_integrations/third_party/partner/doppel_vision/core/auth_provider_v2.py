@@ -16,11 +16,14 @@ from .token_cache import TokenCache
 
 
 def _oauth_error_message(payload: Any, status_code: int) -> str:
+    detail = None
     if isinstance(payload, dict):
-        message = payload.get("error_description") or payload.get("error") or payload.get("message")
-        if message:
-            return str(message)
-    return f"OAuth token request failed with status {status_code}"
+        detail = payload.get("error_description") or payload.get("error") or payload.get("message")
+    suffix = f": {detail}" if detail else ""
+    return (
+        f"OAuth token request failed (HTTP {status_code}){suffix}. "
+        "Check Client ID and Client Secret on the Version 2 tab of Doppel Vision API Settings."
+    )
 
 
 class AuthProviderV2:

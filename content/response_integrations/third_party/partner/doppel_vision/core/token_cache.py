@@ -1,17 +1,37 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 import time
 from typing import Any
 
-from .constants import GLOBAL_CONTEXT_SCOPE, TOKEN_CACHE_PROPERTY_KEY, TOKEN_EXPIRY_BUFFER_SECONDS
+from .constants import (
+    GLOBAL_CONTEXT_SCOPE,
+    INTEGRATION_NAME,
+    TOKEN_CACHE_PROPERTY_KEY,
+    TOKEN_EXPIRY_BUFFER_SECONDS,
+)
+
+
+def _invoke(fn: Any, positional: tuple[Any, ...], named: dict[str, Any]) -> Any:
+    try:
+        return fn(*positional)
+    except TypeError:
+        return fn(**named)
 
 
 class TokenCache:
     """In-process plus SOAR-context cache for v2 OAuth access tokens."""
 
-    def __init__(self, siemplify: Any | None = None, now: Any | None = None) -> None:
-        self.siemplify = siemplify
+    def __init__(
+        self,
+        siemplify: Any | None = None,
+        now: Any | None = None,
+        *,
+        use_context: bool = True,
+    ) -> None:
+        self.siemplify = siemplify if use_context else None
         self._now = now or time.time
         self._memory: dict[str, Any] | None = None
 
@@ -19,7 +39,7 @@ class TokenCache:
         identifier = getattr(self.siemplify, "integration_instance", None)
         if identifier:
             return str(identifier)
-        return "DoppelVision"
+        return INTEGRATION_NAME
 
     def get_token(self) -> str | None:
         cached = self._memory if self._is_fresh(self._memory) else None
@@ -50,16 +70,15 @@ class TokenCache:
         return self._now() < float(record["expires_at"]) - TOKEN_EXPIRY_BUFFER_SECONDS
 
     def _read_context(self) -> dict[str, Any] | None:
-        if self.siemplify is None or not hasattr(self.siemplify, "get_context_property"):
-            return None
-        try:
-            raw = self.siemplify.get_context_property(
-                GLOBAL_CONTEXT_SCOPE,
-                self._identifier(),
-                TOKEN_CACHE_PROPERTY_KEY,
-            )
-        except Exception:
-            return None
+        raw = self._call_context(
+            ("get_context_property",),
+            (GLOBAL_CONTEXT_SCOPE, self._identifier(), TOKEN_CACHE_PROPERTY_KEY),
+            {
+                "context_type": GLOBAL_CONTEXT_SCOPE,
+                "identifier": self._identifier(),
+                "property_key": TOKEN_CACHE_PROPERTY_KEY,
+            },
+        )
         if not raw:
             return None
         try:
@@ -69,15 +88,39 @@ class TokenCache:
         return data if isinstance(data, dict) else None
 
     def _write_context(self, record: dict[str, Any] | None) -> None:
-        if self.siemplify is None or not hasattr(self.siemplify, "set_context_property"):
-            return
-        try:
-            value = "" if record is None else json.dumps(record)
-            self.siemplify.set_context_property(
+        value = "" if record is None else json.dumps(record)
+        self._call_context(
+            ("try_set_context_property", "set_context_property"),
+            (
                 GLOBAL_CONTEXT_SCOPE,
                 self._identifier(),
                 TOKEN_CACHE_PROPERTY_KEY,
                 value,
-            )
-        except Exception:
-            return
+            ),
+            {
+                "context_type": GLOBAL_CONTEXT_SCOPE,
+                "identifier": self._identifier(),
+                "property_key": TOKEN_CACHE_PROPERTY_KEY,
+                "property_value": value,
+            },
+        )
+
+    def _call_context(
+        self,
+        method_names: tuple[str, ...],
+        positional: tuple[Any, ...],
+        named: dict[str, Any],
+    ) -> Any:
+        if self.siemplify is None:
+            return None
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            for name in method_names:
+                fn = getattr(self.siemplify, name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    return _invoke(fn, positional, named)
+                except Exception:
+                    continue
+        return None
