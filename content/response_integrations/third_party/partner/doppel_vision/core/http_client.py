@@ -7,7 +7,7 @@ import requests
 
 from .auth_provider_v1 import AuthProviderV1
 from .auth_provider_v2 import AuthProviderV2
-from .constants import API_VERSION_V2, HTTP_TIMEOUT_SECONDS, MAX_HTTP_RETRIES
+from .constants import API_VERSION_V2, DOPPEL_CLIENT_HEADER, HTTP_TIMEOUT_SECONDS, MAX_HTTP_RETRIES
 from .exceptions import DoppelHttpError
 
 AuthProvider = AuthProviderV1 | AuthProviderV2
@@ -75,6 +75,7 @@ class HttpClient:
                     url=url,
                     headers={
                         "Content-Type": "application/json",
+                        "x-doppel-client": DOPPEL_CLIENT_HEADER,
                         **headers,
                     },
                     params=params,

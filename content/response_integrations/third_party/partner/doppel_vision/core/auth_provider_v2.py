@@ -7,6 +7,7 @@ import requests
 from .constants import (
     API_VERSION_V2,
     DEFAULT_TOKEN_EXPIRES_IN_SECONDS,
+    DOPPEL_CLIENT_HEADER,
     HTTP_TIMEOUT_SECONDS,
     OAUTH_AUDIENCE,
     OAUTH_TOKEN_URL,
@@ -68,6 +69,7 @@ class AuthProviderV2:
                 headers={
                     "accept": "application/json",
                     "Content-Type": "application/json",
+                    "x-doppel-client": DOPPEL_CLIENT_HEADER,
                 },
                 timeout=HTTP_TIMEOUT_SECONDS,
             )

@@ -5,6 +5,7 @@ INTEGRATION_NAME = "DoppelVision"
 API_HOST = "https://api.doppel.com"
 OAUTH_TOKEN_URL = f"{API_HOST}/oauth/token"
 OAUTH_AUDIENCE = "doppel-external"
+DOPPEL_CLIENT_HEADER = "doppel-google-secops/8.0"
 
 API_VERSION_V1 = "v1"
 API_VERSION_V2 = "v2"

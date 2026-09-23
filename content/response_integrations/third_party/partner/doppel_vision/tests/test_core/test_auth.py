@@ -6,7 +6,7 @@ import pytest
 from core.alert_models import normalize_alert, normalize_alert_list
 from core.auth_provider_v1 import AuthProviderV1
 from core.auth_provider_v2 import AuthProviderV2
-from core.constants import OAUTH_AUDIENCE, OAUTH_TOKEN_URL
+from core.constants import DOPPEL_CLIENT_HEADER, OAUTH_AUDIENCE, OAUTH_TOKEN_URL
 from core.exceptions import DoppelConfigError, DoppelHttpError
 from core.token_cache import TokenCache
 
@@ -51,6 +51,7 @@ def test_v2_mints_and_caches_token() -> None:
     _, kwargs = session.post.call_args
     assert kwargs["json"]["audience"] == OAUTH_AUDIENCE
     assert kwargs["json"]["grant_type"] == "client_credentials"
+    assert kwargs["headers"]["x-doppel-client"] == DOPPEL_CLIENT_HEADER
     assert session.post.call_args[0][0] == OAUTH_TOKEN_URL
 
     session.post.reset_mock()

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from core.auth_provider_v1 import AuthProviderV1
 from core.auth_provider_v2 import AuthProviderV2
+from core.constants import DOPPEL_CLIENT_HEADER
 from core.exceptions import DoppelHttpError
 from core.http_client import HttpClient
 from core.token_cache import TokenCache
@@ -52,6 +53,7 @@ def test_v2_401_refreshes_token_and_retries() -> None:
     assert payload == {"alerts": []}
     assert session.request.call_count == 2
     assert session.request.call_args.kwargs["headers"]["Authorization"] == "Bearer fresh"
+    assert session.request.call_args.kwargs["headers"]["x-doppel-client"] == DOPPEL_CLIENT_HEADER
 
 
 def test_retries_429_then_succeeds() -> None:
@@ -63,6 +65,7 @@ def test_retries_429_then_succeeds() -> None:
     client = HttpClient(AuthProviderV1("key"), session=session, sleep=lambda _seconds: None)
     assert client.request("GET", "https://api.doppel.com/v1/alerts") == {"ok": True}
     assert session.request.call_count == 2
+    assert session.request.call_args.kwargs["headers"]["x-doppel-client"] == DOPPEL_CLIENT_HEADER
 
 
 def test_retries_5xx_then_raises() -> None:
