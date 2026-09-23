@@ -194,6 +194,7 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
         incident_id = str(meta.get("incident_id") or "").strip()
         alert.extensions = {
             "vega_entity_type": entity_type,
+            "vega_id": identifier,
             "vega_incident_id": incident_id,
             "source_grouping_identifier": grouping_id,
         }

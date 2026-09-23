@@ -709,6 +709,56 @@ def test_extract_sync_targets_unrelated_alert() -> None:
     assert targets["alert_ids"] == ["alert-3"]
 
 
+def test_extract_sync_targets_camel_case_prefers_uuid_over_vinc() -> None:
+    uuid = "019eea19-551b-7b19-8582-faff640969ff"
+    targets = extract_sync_targets(
+        {
+            "title": "Vega Incident - VINC-1 - phishing",
+            "securityEvents": [
+                {
+                    "vegaEntityType": "Incident",
+                    "vegaUniqueIncidentId": "VINC-1",
+                    "eventClassId": uuid,
+                }
+            ],
+        }
+    )
+    assert targets["mode"] == "incident"
+    assert targets["incident_ids"] == [uuid]
+    assert targets["alert_ids"] == []
+
+
+def test_extract_sync_targets_ticket_id_when_events_dropped() -> None:
+    uuid = "019eea19-551b-7b19-8582-faff640969ff"
+    targets = extract_sync_targets(
+        {
+            "title": "Vega Incident - VINC-1 - phishing",
+            "cyberAlerts": [{"ticketId": f"Vega:{uuid}"}],
+        }
+    )
+    assert targets["mode"] == "incident"
+    assert targets["incident_ids"] == [uuid]
+
+
+def test_extract_sync_targets_batch_title_does_not_close_incident() -> None:
+    uuid = "019eea19-551b-7b19-8582-faff640969ff"
+    targets = extract_sync_targets(
+        {
+            "title": "Vega Incident - VINC-1 - phishing (batch 1)",
+            "events": [
+                {
+                    "vegaEntityType": "Alert",
+                    "vegaId": "alert-1",
+                    "vegaIncidentId": uuid,
+                }
+            ],
+        }
+    )
+    assert targets["mode"] == "alerts"
+    assert targets["alert_ids"] == ["alert-1"]
+    assert targets["incident_ids"] == []
+
+
 def test_soar_meta_round_trip() -> None:
     record = set_soar_meta({"id": "1"}, soar_alert_type=SOAR_ALERT_TYPE_ALERT)
     assert soar_meta(record)["soar_alert_type"] == SOAR_ALERT_TYPE_ALERT

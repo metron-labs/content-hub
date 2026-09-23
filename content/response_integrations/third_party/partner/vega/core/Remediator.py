@@ -8,6 +8,7 @@ from .constants import (
     ENTITY_TYPE_ALERT,
     ENTITY_TYPE_INCIDENT,
     NESTED_RELATED_KEY,
+    SOAR_ALERT_TYPE_INCIDENT,
     SOAR_CASE_DETAILS_PATH,
     SOAR_CASE_SEARCH_PATH,
     SOAR_CASE_STATUS_CLOSED,
@@ -25,31 +26,84 @@ _SOAR_TIMEOUT = 30
 _TRACKED_CAP = 5000
 
 
+_VEGA_ID_KEYS = (
+    "vega_id",
+    "vegaId",
+    "product_log_id",
+    "productLogId",
+    "event_class_id",
+    "eventClassId",
+    "DeviceEventClassID",
+    "DeviceEventClassId",
+    "incidentId",
+    "ticketId",
+    "ticket_id",
+    "vegaAlertId",
+    "vega_alert_id",
+    "vegaUniqueIncidentId",
+    "vega_unique_incident_id",
+)
+_ENTITY_TYPE_KEYS = (
+    "vega_entity_type",
+    "vegaEntityType",
+    "event_type",
+    "eventType",
+    "vega_soar_alert_type",
+    "vegaSoarAlertType",
+)
+
+
+def _normalize_vega_identifier(value: str) -> str:
+    """Strip ``Vega:`` tickets and prefer a UUID prefix over a suffix."""
+    from .mapping import is_graphql_alert_id
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    prefix = f"{VENDOR_NAME}:"
+    if text.startswith(prefix) or text.lower().startswith(prefix.lower()):
+        text = text.split(":", 1)[1].strip()
+    if is_graphql_alert_id(text):
+        return text
+    head = text.split(":", 1)[0].strip()
+    if is_graphql_alert_id(head):
+        return head
+    return text
+
+
 def _event_vega_id(event: dict) -> str:
+    """Own Vega ID for this event. GraphQL UUID wins over VINC-/vegaAlertId."""
     if not isinstance(event, dict):
         return ""
-    for key in (
-        "vega_id",
-        "product_log_id",
-        "vegaAlertId",
-        "vega_alert_id",
-        "vegaUniqueIncidentId",
-        "event_class_id",
-        "eventClassId",
-        "DeviceEventClassID",
-        "DeviceEventClassId",
-    ):
-        value = str(event.get(key) or "").strip()
-        if value:
-            return value
-    return ""
+    from .mapping import is_graphql_alert_id
+
+    candidates: list[str] = []
+    for key in _VEGA_ID_KEYS:
+        raw = str(event.get(key) or "").strip()
+        if not raw:
+            continue
+        value = _normalize_vega_identifier(raw)
+        if value and value not in candidates:
+            candidates.append(value)
+    usable = [item for item in candidates if not _is_child_event_id(item)]
+    pool = usable or candidates
+    for item in pool:
+        if is_graphql_alert_id(item):
+            return item
+    return pool[0] if pool else ""
 
 
 def _event_entity_type(event: dict) -> str:
-    raw = str(event.get("vega_entity_type") or event.get("event_type") or "").strip()
-    if raw.lower() == "incident":
-        return ENTITY_TYPE_INCIDENT
-    return ENTITY_TYPE_ALERT
+    """Incident, Alert, or empty when SOAR omitted the type fields."""
+    if not isinstance(event, dict):
+        return ""
+    for key in _ENTITY_TYPE_KEYS:
+        raw = str(event.get(key) or "").strip().lower()
+        if raw in ("incident", "vega incident"):
+            return ENTITY_TYPE_INCIDENT
+        if raw in ("alert", "vega alert", "alert event"):
+            return ENTITY_TYPE_ALERT
+    return ""
 
 
 def _is_child_event_id(identifier: str) -> bool:
@@ -57,7 +111,12 @@ def _is_child_event_id(identifier: str) -> bool:
 
 
 def _is_alert_event(payload: dict) -> bool:
-    return str(payload.get("vega_entity_type") or "").strip().lower() == "alert event"
+    if not isinstance(payload, dict):
+        return False
+    for key in _ENTITY_TYPE_KEYS:
+        if str(payload.get(key) or "").strip().lower() == "alert event":
+            return True
+    return False
 
 
 def _as_dict(value) -> dict:
@@ -104,7 +163,12 @@ def _iter_case_events(case_payload: dict) -> list[dict]:
     """Events from a case dict (SDK ticket payload or GetCaseFullDetails)."""
     if not isinstance(case_payload, dict):
         return []
-    direct = case_payload.get("events") or case_payload.get("security_events") or []
+    direct = (
+        case_payload.get("events")
+        or case_payload.get("security_events")
+        or case_payload.get("securityEvents")
+        or []
+    )
     events: list[dict] = [item for item in direct if isinstance(item, dict)]
     alerts = (
         case_payload.get("cyber_alerts")
@@ -131,8 +195,23 @@ def _iter_case_events(case_payload: dict) -> list[dict]:
         extra = _as_dict(
             alert.get("additional_properties") or alert.get("additionalProperties")
         )
-        if extra:
-            events.append(extra)
+        stub = dict(extra)
+        for key in (
+            "ticketId",
+            "ticket_id",
+            "deviceEventClassId",
+            "device_event_class_id",
+            "DeviceEventClassId",
+            "vega_entity_type",
+            "vegaEntityType",
+            "event_type",
+            "eventType",
+        ):
+            value = alert.get(key)
+            if value not in (None, "") and key not in stub:
+                stub[key] = value
+        if stub:
+            events.append(stub)
     return events
 
 
@@ -146,19 +225,14 @@ def _walk_vega_targets(payload, entity_hint: str = "") -> list[tuple[str, str]]:
     if not isinstance(payload, dict):
         return found
     hinted = entity_hint
-    entity_raw = str(
-        payload.get("vega_entity_type")
-        or payload.get("vegaEntityType")
-        or payload.get("event_type")
-        or ""
-    ).strip()
-    if entity_raw.lower() == "incident":
+    typed = _event_entity_type(payload)
+    if typed == ENTITY_TYPE_INCIDENT:
         hinted = ENTITY_TYPE_INCIDENT
-    elif entity_raw.lower() == "alert":
+    elif typed == ENTITY_TYPE_ALERT:
         hinted = ENTITY_TYPE_ALERT
     identifier = _event_vega_id(payload)
-    if identifier and entity_raw.lower() != "alert event":
-        found.append((identifier, hinted or ENTITY_TYPE_ALERT))
+    if identifier and not _is_alert_event(payload):
+        found.append((identifier, hinted))
     for value in payload.values():
         if isinstance(value, (dict, list)):
             found.extend(_walk_vega_targets(value, hinted))
@@ -176,13 +250,16 @@ def extract_sync_targets(case_payload: dict) -> dict:
     alert_ids: list[str] = []
     seen_incidents: set[str] = set()
     seen_alerts: set[str] = set()
+    title_is_incident = _is_incident_case_title(case_payload)
     for event in _iter_case_events(case_payload):
         payload = _flatten_event(event)
         identifier = _event_vega_id(payload)
         if _is_alert_event(payload) or _is_child_event_id(identifier):
             continue
         entity_type = _event_entity_type(payload)
-        if entity_type == ENTITY_TYPE_INCIDENT:
+        if entity_type == ENTITY_TYPE_INCIDENT or (
+            not entity_type and title_is_incident
+        ):
             if identifier and identifier not in seen_incidents:
                 seen_incidents.add(identifier)
                 incident_ids.append(identifier)
@@ -194,7 +271,9 @@ def extract_sync_targets(case_payload: dict) -> dict:
         for identifier, entity_type in _walk_vega_targets(case_payload):
             if _is_child_event_id(identifier):
                 continue
-            if entity_type == ENTITY_TYPE_INCIDENT:
+            if entity_type == ENTITY_TYPE_INCIDENT or (
+                not entity_type and title_is_incident
+            ):
                 if identifier not in seen_incidents:
                     seen_incidents.add(identifier)
                     incident_ids.append(identifier)
@@ -294,7 +373,12 @@ def _first_present(payload: dict, keys: tuple[str, ...]):
 
 
 def _is_vega_event_payload(payload: dict) -> bool:
-    return bool(payload.get("vega_id") or payload.get("vega_entity_type"))
+    return bool(
+        payload.get("vega_id")
+        or payload.get("vegaId")
+        or payload.get("vega_entity_type")
+        or payload.get("vegaEntityType")
+    )
 
 
 def _explicit_soar_closed_flag(payload: dict) -> bool | None:
@@ -405,6 +489,17 @@ def _case_id(row: dict) -> str:
 def _case_title(row: dict) -> str:
     value = _ci_get(row, "title", "Title", "name", "Name", "displayName", "DisplayName")
     return str(value).strip() if value not in (None, "") else ""
+
+
+def _is_incident_case_title(payload: dict) -> bool:
+    """True for the Vega incident case, not related-alert ``(batch N)`` cases."""
+    title = _case_title(payload)
+    if not title:
+        return False
+    lowered = title.lower()
+    if "(batch " in lowered:
+        return False
+    return lowered.startswith(SOAR_ALERT_TYPE_INCIDENT.lower())
 
 
 def _unwrap_case(payload) -> dict:

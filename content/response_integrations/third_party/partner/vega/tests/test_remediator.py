@@ -295,6 +295,66 @@ def test_rest_search_resolves_incident_from_nested_case_details() -> None:
     assert posted["environments"] == ["Default Environment"]
 
 
+def test_rest_camel_case_incident_resolves_uuid_not_vinc() -> None:
+    uuid = "019eea19-551b-7b19-8582-faff640969ff"
+    manager = FakeManager()
+    siemplify = _rest_siemplify(
+        [{"id": "42", "title": "Vega Incident - VINC-1 - phishing"}],
+        {
+            "42": {
+                "id": 42,
+                "isClosed": True,
+                "closedTime": AFTER_BASELINE_MS,
+                "title": "Vega Incident - VINC-1 - phishing",
+                "cyberAlerts": [
+                    {
+                        "ticketId": f"Vega:{uuid}",
+                        "additionalProperties": {
+                            "vegaId": uuid,
+                            "vegaEntityType": "Incident",
+                            "vegaUniqueIncidentId": "VINC-1",
+                        },
+                    }
+                ],
+            }
+        },
+    )
+    result = SoarRemediator(manager, siemplify).run_once(_state(f"Vega:{uuid}"))
+    assert manager.resolved_incidents == [[uuid]]
+    assert manager.resolved_alerts == []
+    assert "Synced 1" in result["message"]
+
+
+def test_rest_incident_ticket_only_when_events_dropped() -> None:
+    uuid = "019eea19-551b-7b19-8582-faff640969ff"
+    manager = FakeManager()
+    siemplify = _rest_siemplify(
+        [{"id": "42", "title": "Vega Incident - VINC-1 - phishing"}],
+        {
+            "42": {
+                "id": 42,
+                "isClosed": True,
+                "closedTime": AFTER_BASELINE_MS,
+                "title": "Vega Incident - VINC-1 - phishing",
+                "cyberAlerts": [{"ticketId": f"Vega:{uuid}"}],
+            }
+        },
+    )
+    result = SoarRemediator(manager, siemplify).run_once(
+        _state(f"Vega:{uuid}"),
+        ingest_refs=[
+            {
+                "ticket": f"Vega:{uuid}",
+                "tokens": [uuid, "VINC-1"],
+                "title": "Vega Incident - VINC-1 - phishing",
+            }
+        ],
+    )
+    assert manager.resolved_incidents == [[uuid]]
+    assert manager.resolved_alerts == []
+    assert "Synced 1" in result["message"]
+
+
 def test_extract_sync_targets_skips_child_events_on_related_batch() -> None:
     targets = extract_sync_targets(
         {

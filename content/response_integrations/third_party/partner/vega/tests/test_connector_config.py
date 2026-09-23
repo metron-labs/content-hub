@@ -202,13 +202,46 @@ def test_resolve_incidents_sends_user_status() -> None:
         return {"updateIncidents": {"incidents": [{"incidentId": "inc-1"}]}}
 
     manager.graphql = _graphql
-    manager.resolve_incidents(["inc-1"])
+    uuid = "019eea19-551b-7b19-8582-faff640969ff"
+    manager.resolve_incidents([uuid])
     assert captured[0]["variables"]["input"] == {
-        "incidentIds": ["inc-1"],
+        "incidentIds": [uuid],
         "userStatus": "RESOLVED",
     }
     assert "userStatus" in captured[0]["query"]
     assert "status" not in captured[0]["variables"]["input"]
+
+
+def test_resolve_incidents_looks_up_human_id() -> None:
+    manager = VegaManager(
+        api_root="https://api.vega.io",
+        access_key_id="kid",
+        access_key="secret",
+        session=DummySession(),
+        sleeper=lambda _seconds: None,
+    )
+    captured: list[dict] = []
+    uuid = "019eea19-551b-7b19-8582-faff640969ff"
+
+    def _graphql(query, variables=None):
+        captured.append({"query": query, "variables": dict(variables or {})})
+        if "getIncidents" in query:
+            return {
+                "getIncidents": {
+                    "incidents": [{"id": uuid, "vegaUniqueIncidentId": "VINC-1"}]
+                }
+            }
+        return {"updateIncidents": {"incidents": [{"incidentId": uuid}]}}
+
+    manager.graphql = _graphql
+    manager.resolve_incidents(["VINC-1"])
+    update = [item for item in captured if "updateIncidents" in item["query"]][0]
+    lookup = [item for item in captured if "getIncidents" in item["query"]][0]
+    assert lookup["variables"]["vegaIncidentIds"] == ["VINC-1"]
+    assert update["variables"]["input"] == {
+        "incidentIds": [uuid],
+        "userStatus": "RESOLVED",
+    }
 
 
 def test_get_incidents_stops_paging_when_deadline_passes() -> None:

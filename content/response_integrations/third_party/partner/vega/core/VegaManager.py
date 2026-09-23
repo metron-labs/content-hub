@@ -693,7 +693,29 @@ class VegaManager:
         return envelope
 
     def resolve_incidents(self, incident_ids: list[str]) -> dict:
-        payload = {"incidentIds": list(incident_ids), "userStatus": SYNC_RESOLVED_STATUS}
+        from .constants import ENTITY_TYPE_INCIDENT
+        from .mapping import is_graphql_alert_id, record_id
+
+        graphql_ids: list[str] = []
+        seen: set[str] = set()
+        for raw in incident_ids:
+            lookup = str(raw or "").strip()
+            if not lookup:
+                continue
+            if is_graphql_alert_id(lookup):
+                resolved = lookup
+            else:
+                record = self.get_incident(lookup)
+                resolved = record_id(record, ENTITY_TYPE_INCIDENT) if record else ""
+                if not resolved:
+                    resolved = lookup
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            graphql_ids.append(resolved)
+        if not graphql_ids:
+            raise VegaException("No Vega incident ids to resolve.")
+        payload = {"incidentIds": graphql_ids, "userStatus": SYNC_RESOLVED_STATUS}
         data = self.graphql(UPDATE_INCIDENTS_STATUS_MUTATION, {"input": payload})
         envelope = data.get("updateIncidents") or {}
         errors = envelope.get("errors") or []

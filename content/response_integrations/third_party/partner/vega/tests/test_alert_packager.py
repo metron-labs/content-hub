@@ -127,6 +127,9 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
     assert incident_alert.case_tags is None
     assert incident_alert.tags is None
     assert "tags" not in incident_alert.extensions
+    assert incident_alert.extensions["vega_id"] == "inc-1"
+    assert incident_alert.extensions["vega_entity_type"] == ENTITY_TYPE_INCIDENT
+    assert related_alert.extensions["vega_id"] == "alert-1"
     assert "tags" not in incident_alert.events[0]
     assert getattr(related_alert, "tags", None) in (None, [], "")
     assert standalone.case_tags is None
