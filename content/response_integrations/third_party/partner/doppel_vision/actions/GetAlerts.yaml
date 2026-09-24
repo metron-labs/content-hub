@@ -64,7 +64,7 @@ parameters:
     name: Page Size
     type: string
 -   default_value: ''
-    description: New queue status to update alert with (id required)
+    description: Filter alerts by queue state.
     is_mandatory: false
     name: Queue State
     optional_values:

@@ -22,7 +22,6 @@ def normalize_alert(raw_alert: Any) -> dict[str, Any] | None:
 
     return {
         "id": raw_alert.get("id") or None,
-        "alert_id": raw_alert.get("alert_id") or raw_alert.get("id") or None,
         "entity": raw_alert.get("entity"),
         "entity_content": raw_alert.get("entity_content") if isinstance(raw_alert.get("entity_content"), dict) else {},
         "severity": raw_alert.get("severity"),

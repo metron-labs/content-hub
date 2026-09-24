@@ -112,8 +112,6 @@ class DoppelManager:
             params=filters or None,
         )
         alerts = payload.get("alerts", []) if isinstance(payload, dict) else []
-        if not alerts:
-            raise ValueError("No alerts found or empty response received.")
         return alerts
 
     def create_alert(self, entity: str) -> dict[str, Any]:
