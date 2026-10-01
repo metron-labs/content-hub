@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -27,6 +28,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from requests.models import Response
@@ -178,6 +180,150 @@ class BackendAPI:
         resp.raise_for_status()
         return resp
 
+    def _paginate_1p_get_stream(  # ruff:ignore[complex-structure, too-many-arguments, too-many-branches, too-many-positional-arguments]
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        root_response_key: str = "items",
+        page_size: int | None = None,
+        token_param_key: str = "pageToken",  # ruff:ignore[hardcoded-password-default]
+        token_response_key: str = "nextPageToken",  # ruff:ignore[hardcoded-password-default]
+        max_pages: int | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield items across paginated requests without buffering entire datasets in memory.
+
+        Args:
+            url: The 1P endpoint URL.
+            params: Optional query parameters for the request.
+            root_response_key: The response JSON key containing the item list. Defaults to "items".
+            page_size: Optional page size limit to request per page.
+            token_param_key: Query parameter key used to pass the token. Defaults to "pageToken".
+            token_response_key: Response key containing the next page token. Defaults to "nextPageToken".
+            max_pages: Optional maximum number of pages to fetch before stopping.
+
+        Yields:
+            dict[str, Any]: Individual item records from each page.
+
+        Raises:
+            JSONDecodeError: If a response body cannot be decoded as JSON.
+
+        """
+        page_token: str | None = None
+        seen_tokens: set[str] = set()
+        pages_fetched = 0
+        request_params: dict[str, Any] = dict(params) if params else {}
+        if page_size is not None:
+            request_params["pageSize"] = page_size
+
+        while True:
+            if max_pages is not None and pages_fetched >= max_pages:
+                logger.debug("Reached max page limit of %d for URL: %s", max_pages, url)
+                break
+            if page_token:
+                request_params[token_param_key] = page_token
+            else:
+                request_params.pop(token_param_key, None)
+
+            resp = self.session.get(url, params=dict(request_params))
+            if not resp.ok:
+                logger.error(
+                    "Request to '%s' failed: %d - %s",
+                    url,
+                    resp.status_code,
+                    resp.text,
+                )
+            resp.raise_for_status()
+            if resp.status_code == HTTPStatus.NO_CONTENT:
+                break
+            try:
+                payload = resp.json()
+            except requests.exceptions.JSONDecodeError:
+                logger.exception("JSON Decode Error for '%s'. Response text: %s", url, resp.text)
+                raise
+
+            if not isinstance(payload, dict):
+                logger.error("Expected dictionary response from '%s', got %s", url, type(payload))
+                break
+
+            items = payload.get(root_response_key, [])
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        yield item
+
+            page_token = payload.get(token_response_key)
+            pages_fetched += 1
+            if not page_token:
+                break
+            if page_token in seen_tokens:
+                logger.warning(
+                    "Detected duplicate page token '%s' from URL '%s'. Breaking to prevent loop.",
+                    page_token,
+                    url,
+                )
+                break
+            seen_tokens.add(page_token)
+
+    def _paginate_1p_get(  # ruff:ignore[too-many-arguments, too-many-positional-arguments]
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        root_response_key: str = "items",
+        page_size: int | None = None,
+        token_param_key: str = "pageToken",  # ruff:ignore[hardcoded-password-default]
+        token_response_key: str = "nextPageToken",  # ruff:ignore[hardcoded-password-default]
+        max_pages: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch all items from a 1P API endpoint with pagination support.
+
+        Args:
+            url: The 1P endpoint URL.
+            params: Optional query parameters for the request.
+            root_response_key: The response JSON key containing the item list. Defaults to "items".
+            page_size: Optional page size limit to request per page.
+            token_param_key: Query parameter key used to pass the token. Defaults to "pageToken".
+            token_response_key: Response key containing the next page token. Defaults to "nextPageToken".
+            max_pages: Optional maximum number of pages to fetch before stopping.
+
+        Returns:
+            list[dict[str, Any]]: Aggregated list of items from all pages.
+
+        """
+        return list(
+            self._paginate_1p_get_stream(
+                url=url,
+                params=params,
+                root_response_key=root_response_key,
+                page_size=page_size,
+                token_param_key=token_param_key,
+                token_response_key=token_response_key,
+                max_pages=max_pages,
+            )
+        )
+
+    def list_installed_integrations(self) -> list[dict[str, Any]]:
+        """List all installed integrations on the SOAR platform.
+
+        Returns:
+            The list of installed integrations.
+
+        """
+        url: str = f"{self.api_root}/api/1p/external/v1/integrations"
+        return self._paginate_1p_get(url, root_response_key="integrations")
+
+    def list_integration_instances(self, integration_id: str = "$all") -> list[dict[str, Any]]:
+        """List integration instances for a given integration identifier or all integrations.
+
+        Args:
+            integration_id: The integration identifier, defaults to '$all'.
+
+        Returns:
+            The list of integration instances.
+
+        """
+        url: str = f"{self.api_root}/api/1p/external/v1/integrations/{integration_id}/integrationInstances"
+        return self._paginate_1p_get(url, root_response_key="integrationInstances")
+
     def upload_playbook(self, zip_path: Path) -> dict[str, Any]:
         """Upload a zipped playbook package to the backend.
 
@@ -224,5 +370,146 @@ class BackendAPI:
         payload = {"identifiers": [playbook_identifier]}
 
         resp = self.session.post(url, json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_views(self) -> list[dict[str, Any]]:
+        """Get all installed view templates (cards) from the SOAR platform.
+
+        Returns:
+            list: Contains all view templates.
+
+        """
+        url: str = f"{self.api_root}/api/external/v1/case-overview/GetOverviewTemplateCards"
+        resp = self.session.get(url)
+        resp.raise_for_status()
+        return resp.json()
+
+    def download_view(self, template_identifier: str) -> dict[str, Any]:
+        """Download the full details of a view template by its identifier.
+
+        Args:
+            template_identifier: The identifier of the view template to download.
+
+        Returns:
+            dict: The response JSON containing the view template data.
+
+        """
+        url: str = f"{self.api_root}/api/external/v1/case-overview/GetFullOverviewTemplateDetails/{template_identifier}"
+        resp = self.session.get(url)
+        resp.raise_for_status()
+        return resp.json()
+
+    def upload_view(self, view_data: dict[str, Any]) -> dict[str, Any]:
+        """Upload/Save a view template to the SOAR platform.
+
+        Args:
+            view_data: The built view template data (OverviewTemplate and Roles).
+
+        Returns:
+            dict: The backend response after saving the view template.
+
+        """
+        url: str = f"{self.api_root}/api/external/v1/case-overview/SaveOverviewTemplate"
+        resp = self.session.post(url, json=view_data)
+        if not resp.ok:
+            logger.error("SaveOverviewTemplate failed with status %s. Response: %s", resp.status_code, resp.text)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_custom_fields(self) -> list[dict[str, Any]]:
+        """List all custom fields from the SOAR platform.
+
+        Returns:
+            list[dict[str, Any]]: The list of custom fields.
+
+        """
+        url: str = f"{self.api_root}/api/1p/external/v1/customFields"
+        return self._paginate_1p_get(url, root_response_key="customFields")
+
+    def download_custom_field(self, field_id: int) -> dict[str, Any]:
+        """Download a custom field by ID from the SOAR platform.
+
+        Args:
+            field_id: The ID of the custom field.
+
+        Returns:
+            The custom field details.
+
+        """
+        url: str = f"{self.api_root}/api/1p/external/v1/customFields/{field_id}"
+        resp = self.session.get(url)
+        resp.raise_for_status()
+        return resp.json()
+
+    def create_custom_field(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new custom field on the SOAR platform.
+
+        Args:
+            data: The custom field data.
+
+        Returns:
+            The created custom field details.
+
+        """
+        url: str = f"{self.api_root}/api/1p/external/v1/customFields"
+        resp = self.session.post(url, json=data)
+        resp.raise_for_status()
+        return resp.json()
+
+    def update_custom_field(self, field_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        """Update an existing custom field on the SOAR platform.
+
+        Args:
+            field_id: The ID of the custom field.
+            data: The custom field data.
+
+        Returns:
+            The updated custom field details.
+
+        """
+        url: str = f"{self.api_root}/api/1p/external/v1/customFields/{field_id}"
+        resp = self.session.patch(url, json=data)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_alert_grouping_rules(self) -> list[dict[str, Any]]:
+        """List all alert grouping rules from the SOAR platform.
+
+        Returns:
+            The list of alert grouping rules.
+
+        """
+        url: str = f"{self.api_root}/api/1p/external/v1/system/settings/alert-grouping-rules"
+        return self._paginate_1p_get(url, root_response_key="alertGroupingRules")
+
+    def create_alert_grouping_rule(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new alert grouping rule on the SOAR platform.
+
+        Args:
+            data: The alert grouping rule data.
+
+        Returns:
+            The created alert grouping rule details.
+
+        """
+        url: str = f"{self.api_root}/api/1p/external/v1/system/settings/alert-grouping-rules"
+        resp = self.session.post(url, json=data)
+        resp.raise_for_status()
+        return resp.json()
+
+    def update_alert_grouping_rule(self, rule_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        """Update an existing alert grouping rule on the SOAR platform.
+
+        Args:
+            rule_id: The ID of the alert grouping rule.
+            data: The alert grouping rule data.
+
+        Returns:
+            The updated alert grouping rule details.
+
+        """
+        url: str = f"{self.api_root}/api/1p/external/v1/system/settings/alert-grouping-rules/{rule_id}"
+        resp = self.session.patch(url, json=data)
         resp.raise_for_status()
         return resp.json()

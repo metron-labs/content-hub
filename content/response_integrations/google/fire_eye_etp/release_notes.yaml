@@ -110,3 +110,19 @@
   deprecated: false
   removed: false
   ticket_number: '497987554'
+- description: Updated the integration's actions AI metadata.
+  version: 10.0
+  item_name: FireEyeETP
+  item_type: Integration
+  publish_time: '2026-07-17'
+  ticket_number: ''
+- description: 'FireEye ETP - Email Alerts Connector - Fixed an issue where alert details and event data were missing for v2 API, and updated ontology mapping rules.'
+  integration_version: 11.0
+  item_name: FireEye ETP - Email Alerts Connector
+  item_type: Connector
+  publish_time: '2026-09-03'
+  new: false
+  regressive: false
+  deprecated: false
+  removed: false
+  ticket_number: '543804375'
