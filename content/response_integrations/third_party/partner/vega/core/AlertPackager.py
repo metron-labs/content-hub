@@ -22,21 +22,6 @@ from .mapping import (
 from .utils import parse_iso_timestamp, safe_log
 
 
-_TIME_KEYS = (
-    "updatedAt",
-    "lastUpdated",
-    "createdAt",
-    "timestamp",
-    "eventTime",
-    "event_time",
-    "origin_time",
-    "occurredAt",
-    "occurred_at",
-    "datetime",
-    "_time",
-    "time",
-    "Time",
-)
 # Reject epoch-0 / 1970 timestamps and values that are not real event times.
 _MIN_VALID_EVENT_MS = 946684800000  # 2000-01-01
 _MAX_VALID_EVENT_MS = 4102444800000  # 2100-01-01
@@ -74,23 +59,103 @@ def _coerce_unix_ms(raw) -> int | None:
     return millis
 
 
-def _unix_ms(record: dict, fallback: int) -> int:
+def _field_ms(record: dict, *keys: str) -> int | None:
     if not isinstance(record, dict):
-        return fallback
-    for key in _TIME_KEYS:
+        return None
+    for key in keys:
         coerced = _coerce_unix_ms(record.get(key))
         if coerced is not None:
             return coerced
-    fields = record.get("fields")
-    if isinstance(fields, dict):
-        for key in _TIME_KEYS:
-            coerced = _coerce_unix_ms(fields.get(key))
-            if coerced is not None:
-                return coerced
-    return fallback
+    return None
 
 
-def _attach_child_events(alert, record: dict, event_time: int, logger_instance=None) -> None:
+def record_start_end(record: dict, fallback: int) -> tuple[int, int]:
+    """Incident and alert window: start is createdAt, end is last update.
+
+    Incidents send lastUpdated. Alerts send updatedAt for the same moment.
+    A missing end uses the start so SecOps does not get an empty end time.
+    """
+    start = _field_ms(record, "createdAt")
+    end = _field_ms(record, "lastUpdated", "updatedAt")
+    if start is None:
+        start = fallback
+    if end is None:
+        end = start
+    return start, end
+
+
+def _time_values(payload: dict) -> list[int]:
+    """Valid timestamps from keys whose name contains 'time'."""
+    found: list[int] = []
+    if not isinstance(payload, dict):
+        return found
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            found.extend(_time_values(value))
+            continue
+        if "time" not in str(key).lower():
+            continue
+        coerced = _coerce_unix_ms(value)
+        if coerced is not None:
+            found.append(coerced)
+    return found
+
+
+def event_start_end(payload: dict, parent_start: int, parent_end: int) -> tuple[int, int]:
+    """Alert-event window from any time field, otherwise the parent alert."""
+    times = _time_values(payload if isinstance(payload, dict) else {})
+    if not times:
+        return parent_start, parent_end
+    return min(times), max(times)
+
+
+_PINNED_TIME_KEYS = {
+    "createdat",
+    "updatedat",
+    "lastupdated",
+    "created_at",
+    "updated_at",
+    "last_updated",
+}
+
+
+def _pin_related_event(event: dict, start_time: int, end_time: int) -> None:
+    """Force one window so SecOps does not split a batch on event time.
+
+    Grouping by source identifier ignores the 24-hour setting only when every
+    alert in the batch carries that same identifier. Per-alert createdAt and
+    child-event times make the platform fall back to entity grouping, which
+    does use the 24-hour window and opens a new case per alert.
+    """
+    if not isinstance(event, dict):
+        return
+    original_created = event.get("created_at") or event.get("createdAt")
+    original_updated = (
+        event.get("updated_at") or event.get("updatedAt") or event.get("lastUpdated")
+    )
+    event["StartTime"] = start_time
+    event["EndTime"] = end_time
+    for key in list(event.keys()):
+        folded = str(key).lower()
+        compact = folded.replace("_", "")
+        if compact in {"starttime", "endtime"}:
+            continue
+        if "time" in folded or compact in _PINNED_TIME_KEYS or folded in _PINNED_TIME_KEYS:
+            event.pop(key, None)
+    if original_created not in (None, ""):
+        event["vega_alert_created_at"] = str(original_created)
+    if original_updated not in (None, ""):
+        event["vega_alert_updated_at"] = str(original_updated)
+
+
+def _attach_child_events(
+    alert,
+    record: dict,
+    parent_start: int,
+    parent_end: int,
+    logger_instance=None,
+    pin_to_parent: bool = False,
+) -> None:
     identifier = record_id(record, ENTITY_TYPE_ALERT)
     child_events = list(record.get("alert_events") or [])
     if len(child_events) > MAX_EVENTS_PER_ALERT:
@@ -105,15 +170,19 @@ def _attach_child_events(alert, record: dict, event_time: int, logger_instance=N
         child_events = child_events[:MAX_EVENTS_PER_ALERT]
     for index, vega_event in enumerate(child_events):
         payload = vega_event if isinstance(vega_event, dict) else {}
-        child_time = _unix_ms(
-            normalize_alert_event(payload) if payload else {},
-            event_time,
-        )
-        alert.events.append(
-            build_vega_alert_event_dict(
-                record, vega_event, child_time, child_time, index
+        normalized = normalize_alert_event(payload) if payload else {}
+        if pin_to_parent:
+            child_start, child_end = parent_start, parent_end
+        else:
+            child_start, child_end = event_start_end(
+                normalized, parent_start, parent_end
             )
+        child = build_vega_alert_event_dict(
+            record, vega_event, child_start, child_end, index
         )
+        if pin_to_parent:
+            _pin_related_event(child, parent_start, parent_end)
+        alert.events.append(child)
 
 
 def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=None) -> list:
@@ -122,9 +191,11 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
     Incident case: one AlertInfo for the Vega incident. Related Vega alerts
     are separate AlertInfo objects with a batch grouping id so they form their
     own cases. Each alert keeps its own Name (Vega Incident vs Vega Alert).
-    Related batches share Product, grouping time, and Rule Generator (the
-    incident title plus batch N). Standalone Vega alerts keep their own title
-    and grouping id.
+    Related batches share Product, Rule Generator (the incident title plus
+    batch N), and the incident createdAt/lastUpdated window. SecOps groups on
+    that shared window, so a batch stays one case up to the 90-alert cap.
+    The incident case and standalone alerts use their own createdAt and last
+    update.
     """
     from soar_sdk.SiemplifyConnectorsDataModel import AlertInfo
     from soar_sdk.SiemplifyUtils import unix_now
@@ -143,11 +214,18 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
         if not identifier:
             continue
         meta = soar_meta(record)
-        record_time = _unix_ms(record, current_time)
-        grouping_time = _unix_ms(
-            {"createdAt": meta.get("grouping_time")}, record_time
-        )
-        alert_time = grouping_time if meta.get("is_incident_case") else record_time
+        if meta.get("is_related_batch"):
+            # One window for the whole batch. Per-alert createdAt values are
+            # often days apart, and SecOps then opens a new case for each.
+            start_time, end_time = record_start_end(
+                {
+                    "createdAt": meta.get("grouping_start") or meta.get("grouping_time"),
+                    "lastUpdated": meta.get("grouping_end") or meta.get("grouping_time"),
+                },
+                current_time,
+            )
+        else:
+            start_time, end_time = record_start_end(record, current_time)
         severity = record_severity(record)
         ticket_suffix = str(meta.get("ticket_suffix") or "").strip()
         ticket_key = f"{identifier}:{ticket_suffix}" if ticket_suffix else identifier
@@ -187,8 +265,8 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
             or record.get("incidentFindings")
             or alert.name
         )
-        alert.start_time = alert_time
-        alert.end_time = alert_time
+        alert.start_time = start_time
+        alert.end_time = end_time
         alert.Severity = severity
         alert.priority = alert_priority(severity)
         incident_id = str(meta.get("incident_id") or "").strip()
@@ -198,11 +276,19 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
             "vega_incident_id": incident_id,
             "source_grouping_identifier": grouping_id,
         }
-        alert.events.append(
-            build_event_dict(record, entity_type, record_time, record_time)
-        )
+        parent_event = build_event_dict(record, entity_type, start_time, end_time)
+        if meta.get("is_related_batch"):
+            _pin_related_event(parent_event, start_time, end_time)
+        alert.events.append(parent_event)
         if entity_type == ENTITY_TYPE_ALERT:
-            _attach_child_events(alert, record, record_time, logger_instance)
+            _attach_child_events(
+                alert,
+                record,
+                start_time,
+                end_time,
+                logger_instance,
+                pin_to_parent=bool(meta.get("is_related_batch")),
+            )
         # Do not set AlertInfo.case_tags here. SecOps treats each ingest
         # write plus playbook add_tag as a new catalog tag, which duplicates
         # names. Events still carry labels for Apply Vega Labels as Tags.

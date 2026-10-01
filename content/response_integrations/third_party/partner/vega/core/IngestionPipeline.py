@@ -482,6 +482,7 @@ class IngestionPipeline:
         ).strip()
         if summary and summary not in description:
             alert["description"] = f"{summary}\n\n{description}".strip() if description else summary
+        grouping_start, grouping_end = self._incident_time_window(incident)
         return set_soar_meta(
             alert,
             soar_alert_type=SOAR_ALERT_TYPE_ALERT,
@@ -489,7 +490,9 @@ class IngestionPipeline:
             case_tags=list(case_tags or []),
             incident_label_tags=record_label_tags(incident),
             case_title=incident_case_title(incident, related_batch),
-            grouping_time=record_timestamp(incident),
+            grouping_time=grouping_start or record_timestamp(incident),
+            grouping_start=grouping_start,
+            grouping_end=grouping_end,
             incident_id=incident_id,
             incident_display_id=display_id,
             incident_name=record_name(incident),
@@ -622,6 +625,89 @@ class IngestionPipeline:
                     if self._should_stop(len(records)):
                         return
 
+    def _incident_time_window(self, incident: dict) -> tuple[str, str]:
+        """Shared createdAt / lastUpdated used so a batch stays one SOAR case."""
+        start = str((incident or {}).get("createdAt") or "").strip()
+        end = str(
+            (incident or {}).get("lastUpdated")
+            or (incident or {}).get("updatedAt")
+            or start
+        ).strip()
+        return start, end
+
+    def _incident_alerts_count(self, incident: dict) -> int:
+        try:
+            return max(int((incident or {}).get("alertsCount") or 0), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _nested_alerts_are_short(self, incident: dict) -> bool:
+        expected = self._incident_alerts_count(incident)
+        return expected > len(incident_alert_ids(incident))
+
+    def _backfill_related_index(
+        self,
+        incidents: list[dict],
+        related_index: dict[str, dict],
+        window: dict,
+    ) -> dict[str, dict]:
+        """Load related alerts missing from getIncidents `alerts`.
+
+        Vega can return alertsCount 806 while the nested alerts list is only a
+        page of that set. Those missing alerts never become SOAR cases.
+        """
+        short = [item for item in incidents if self._nested_alerts_are_short(item)]
+        if not short or self._deadline_reached():
+            if short and self._deadline_reached():
+                self._incomplete = True
+            return related_index
+        wanted: set[str] = set()
+        for incident in short:
+            identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
+            display_id = record_display_id(incident, ENTITY_TYPE_INCIDENT)
+            if identifier:
+                wanted.add(identifier)
+            if display_id:
+                wanted.add(display_id)
+        self._log(
+            "info",
+            "Nested alerts list is short for %s incident(s); loading related "
+            "alerts by incident reference.",
+            len(short),
+        )
+        try:
+            rows = self.manager.get_alerts(
+                self._alert_variables(self._id_lookup_window(window), True),
+                None,
+                deadline_monotonic=self._deadline,
+            )
+            self._mark_if_truncated()
+        except Exception as exc:
+            self._incomplete = True
+            self._log(
+                "warning",
+                "Unable to backfill related Vega alerts: %s",
+                exc,
+            )
+            return related_index
+        matched: list[dict] = []
+        for alert in rows:
+            if not isinstance(alert, dict):
+                continue
+            ref_id, _ = related_incident_ref(alert)
+            if ref_id and ref_id in wanted:
+                matched.append(alert)
+        extra = index_alert_records(matched)
+        merged = dict(related_index)
+        for key, alert in extra.items():
+            merged.setdefault(key, alert)
+        self._log(
+            "info",
+            "Backfill matched %s related Vega alert(s) for short incident lists.",
+            len({record_id(item, ENTITY_TYPE_ALERT) for item in matched}),
+        )
+        return merged
+
     def _incident_ingested_key(self, incident: dict) -> str:
         identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
         return f"incident:{identifier}" if identifier else ""
@@ -673,6 +759,7 @@ class IngestionPipeline:
             for incident in incidents:
                 all_alert_ids.extend(self._new_related_alert_ids(incident, ingested_set))
             related_index = self._fetch_alerts_by_ids(all_alert_ids, window)
+            related_index = self._backfill_related_index(incidents, related_index, window)
         for incident in incidents:
             if self._should_stop(len(records)):
                 break

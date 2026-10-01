@@ -414,6 +414,57 @@ def test_singular_entity_names_match_alerts_and_incidents() -> None:
     assert _ids(summary) == ["inc-1", "alert-1", "alert-2", "alert-3"]
 
 
+def test_short_nested_alert_list_backfills_related_alerts() -> None:
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "VINC-1",
+            "name": "Campaign",
+            "createdAt": "2026-07-28T11:22:43Z",
+            "lastUpdated": "2026-07-29T01:00:00Z",
+            "alertsCount": 3,
+            "alerts": [{"alertId": "alert-1", "name": "Phish"}],
+        }
+    ]
+    manager.alerts = [
+        {
+            "id": "alert-1",
+            "vegaAlertId": "VALERT-1",
+            "name": "Phish",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "relatedIncidents": [{"incidentId": "inc-1"}],
+        },
+        {
+            "id": "alert-2",
+            "vegaAlertId": "VALERT-2",
+            "name": "Beacon",
+            "createdAt": "2026-02-01T00:00:00Z",
+            "relatedIncidents": [{"incidentId": "inc-1"}],
+        },
+        {
+            "id": "alert-3",
+            "vegaAlertId": "VALERT-3",
+            "name": "Noise",
+            "createdAt": "2026-03-01T00:00:00Z",
+            "relatedIncidents": [{"incidentId": "other"}],
+        },
+    ]
+    summary = _pipeline(manager, entities="Alerts,Incidents", has_related="Yes").run()
+    assert _ids(summary) == ["inc-1", "alert-1", "alert-2"]
+    related = [item[1] for item in summary["records"] if item[0] == ENTITY_TYPE_ALERT]
+    assert {soar_meta(item)["grouping_id"] for item in related} == {
+        "Vega:incident:inc-1:batch:1"
+    }
+    assert {soar_meta(item)["grouping_start"] for item in related} == {
+        "2026-07-28T11:22:43Z"
+    }
+    assert {soar_meta(item)["grouping_end"] for item in related} == {
+        "2026-07-29T01:00:00Z"
+    }
+    assert any(call.get("hasRelatedIncidents") is True for call in manager.alert_calls)
+
+
 def test_incident_overflow_creates_separate_related_batches() -> None:
     manager = FakeManager()
     manager.incidents = [

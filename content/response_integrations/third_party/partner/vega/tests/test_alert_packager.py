@@ -123,7 +123,13 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
     assert incident_alert.source_grouping_identifier == "Vega:incident:inc-1"
     assert related_alert.source_grouping_identifier == "Vega:incident:inc-1:batch:1"
     assert standalone.source_grouping_identifier == "Vega:alert:alert-3"
-    assert incident_alert.start_time == related_alert.start_time
+    assert incident_alert.start_time == incident_alert.events[0]["StartTime"]
+    assert incident_alert.end_time == incident_alert.events[0]["EndTime"]
+    assert related_alert.start_time == related_alert.events[0]["StartTime"]
+    assert related_alert.end_time == related_alert.events[0]["EndTime"]
+    assert related_alert.start_time != incident_alert.start_time
+    assert related_alert.events[1]["StartTime"] == related_alert.start_time
+    assert related_alert.events[1]["EndTime"] == related_alert.end_time
     assert incident_alert.case_tags is None
     assert incident_alert.tags is None
     assert "tags" not in incident_alert.extensions
@@ -242,13 +248,138 @@ def test_packager_keeps_empty_labels_and_incident_tag_names() -> None:
     assert standalone.case_tags is None
 
 
-def test_child_event_zero_timestamp_falls_back_to_parent() -> None:
-    from core.AlertPackager import _unix_ms
+def test_related_batch_shares_incident_time_window() -> None:
+    incident = set_soar_meta(
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "VINC-1",
+            "name": "Campaign",
+            "createdAt": "2026-07-28T11:22:43Z",
+            "lastUpdated": "2026-07-29T01:00:00Z",
+        },
+        grouping_id="Vega:incident:inc-1",
+        case_title="Vega Incident - VINC-1 - Campaign",
+        is_incident_case=True,
+        is_related_batch=False,
+    )
+    older = set_soar_meta(
+        {
+            "id": "alert-1",
+            "vegaAlertId": "VALERT-1",
+            "name": "Phish",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-02T00:00:00Z",
+        },
+        grouping_id="Vega:incident:inc-1:batch:1",
+        case_title="Vega Incident - VINC-1 - Campaign (batch 1)",
+        grouping_start="2026-07-28T11:22:43Z",
+        grouping_end="2026-07-29T01:00:00Z",
+        is_incident_case=True,
+        is_related_batch=True,
+    )
+    newer = set_soar_meta(
+        {
+            "id": "alert-2",
+            "vegaAlertId": "VALERT-2",
+            "name": "Beacon",
+            "createdAt": "2026-04-05T01:18:35Z",
+            "updatedAt": "2026-04-06T02:00:00Z",
+            "alert_events": [
+                {"name": "login", "_time": "2026-01-01T00:00:00Z"}
+            ],
+        },
+        grouping_id="Vega:incident:inc-1:batch:1",
+        case_title="Vega Incident - VINC-1 - Campaign (batch 1)",
+        grouping_start="2026-07-28T11:22:43Z",
+        grouping_end="2026-07-29T01:00:00Z",
+        is_incident_case=True,
+        is_related_batch=True,
+    )
+    siemplify = SimpleNamespace(
+        context=SimpleNamespace(connector_info=SimpleNamespace(environment="Default"))
+    )
+    _install_fake_sdk()
+    from core.AlertPackager import create_alerts
 
-    parent_ms = 1_700_000_000_000
-    assert _unix_ms({"time": 0, "_time": "0"}, parent_ms) == parent_ms
-    assert _unix_ms({"_time": 1_720_000_000}, parent_ms) == 1_720_000_000_000
-    assert _unix_ms({"createdAt": "2024-07-01T00:00:00Z"}, 1) == 1_719_792_000_000
+    packages = create_alerts(
+        [
+            (ENTITY_TYPE_INCIDENT, incident),
+            (ENTITY_TYPE_ALERT, older),
+            (ENTITY_TYPE_ALERT, newer),
+        ],
+        siemplify,
+    )
+    incident_alert, older_alert, newer_alert = packages
+    assert incident_alert.start_time == older_alert.start_time == newer_alert.start_time
+    assert incident_alert.end_time == older_alert.end_time == newer_alert.end_time
+    assert older_alert.start_time == 1_785_237_763_000
+    assert older_alert.end_time == 1_785_286_800_000
+    assert older_alert.events[0]["StartTime"] == older_alert.start_time
+    assert older_alert.events[0]["EndTime"] == older_alert.end_time
+    assert "created_at" not in newer_alert.events[0]
+    assert "updated_at" not in newer_alert.events[0]
+    assert newer_alert.events[0]["vega_alert_created_at"] == "2026-04-05T01:18:35Z"
+    assert newer_alert.events[1]["StartTime"] == newer_alert.start_time
+    assert newer_alert.events[1]["EndTime"] == newer_alert.end_time
+    assert "_time" not in newer_alert.events[1]
+
+
+def test_record_start_is_created_at_and_end_is_last_update() -> None:
+    from core.AlertPackager import record_start_end
+
+    incident_start, incident_end = record_start_end(
+        {
+            "createdAt": "2026-07-28T11:22:43Z",
+            "lastUpdated": "2026-07-29T01:00:00Z",
+        },
+        1,
+    )
+    alert_start, alert_end = record_start_end(
+        {
+            "createdAt": "2026-04-05T01:18:35Z",
+            "updatedAt": "2026-04-06T02:00:00Z",
+        },
+        1,
+    )
+    assert incident_start == 1_785_237_763_000
+    assert incident_end == 1_785_286_800_000
+    assert alert_start == 1_775_351_915_000
+    assert alert_end == 1_775_440_800_000
+    missing_end, missing_end_close = record_start_end(
+        {"createdAt": "2024-07-01T00:00:00Z"}, 1
+    )
+    assert missing_end == missing_end_close == 1_719_792_000_000
+
+
+def test_alert_event_uses_time_fields_or_parent_alert() -> None:
+    from core.AlertPackager import event_start_end
+
+    parent_start = 1_775_351_915_000
+    parent_end = 1_775_440_800_000
+    assert event_start_end({"name": "login"}, parent_start, parent_end) == (
+        parent_start,
+        parent_end,
+    )
+    assert event_start_end(
+        {"time": 0, "_time": "0", "timestamp": "none"},
+        parent_start,
+        parent_end,
+    ) == (parent_start, parent_end)
+    assert event_start_end({"_time": 1_720_000_000}, parent_start, parent_end) == (
+        1_720_000_000_000,
+        1_720_000_000_000,
+    )
+    start, end = event_start_end(
+        {
+            "createdAt": "2024-07-01T00:00:00Z",
+            "_time": "2026-01-01T00:00:00Z",
+            "end_time": "2026-01-02T00:00:00Z",
+        },
+        parent_start,
+        parent_end,
+    )
+    assert start == 1_767_225_600_000
+    assert end == 1_767_312_000_000
 
 
 def test_overflow_incident_uses_unique_ticket_and_same_case_title() -> None:
