@@ -1,0 +1,1146 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+from http import HTTPStatus
+from pathlib import Path  # ruff:ignore[typing-only-standard-library-import]
+from unittest import mock
+
+import pytest
+import requests
+import yaml
+from typer.testing import CliRunner
+
+from mp.dev_env.api import BackendAPI
+from mp.dev_env.sub_commands.pull import pull_app
+from mp.dev_env.sub_commands.push import push_app
+
+runner = CliRunner()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_custom_field(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {"name": "projects//locations//instances//customFields/1", "id": 1, "displayName": "Test Field"},
+        {"name": "projects//locations//instances//customFields/2", "id": 2, "displayName": "Other Field"},
+    ]
+
+    mock_api.download_custom_field.return_value = {
+        "name": "projects//locations//instances//customFields/1",
+        "id": 1,
+        "displayName": "Test Field",
+        "type": "String",
+    }
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(pull_app, ["custom-field", "Test Field"])
+
+    assert result.exit_code == 0
+    mock_api.download_custom_field.assert_called_once_with(1)
+
+    saved_file = tmp_path / "shared" / "Test_Field.yaml"
+    assert saved_file.exists()
+
+    with saved_file.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+        assert data["displayName"] == "Test Field"
+        assert "id" not in data
+        assert "name" not in data
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_all_custom_fields(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {"name": "projects//locations//instances//customFields/1", "id": 1, "displayName": "Test Field"},
+    ]
+
+    mock_api.download_custom_field.return_value = {
+        "name": "projects//locations//instances//customFields/1",
+        "id": 1,
+        "displayName": "Test Field",
+        "type": "String",
+    }
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(pull_app, ["custom-field", "--all"])
+
+    assert result.exit_code == 0
+    mock_api.download_custom_field.assert_called_once_with(1)
+
+    saved_file = tmp_path / "shared" / "Test_Field.yaml"
+    assert saved_file.exists()
+    with saved_file.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+        assert "id" not in data
+        assert "name" not in data
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.push.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.push.get_backend_api")
+def test_push_custom_field_update(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {"name": "projects//locations//instances//customFields/1", "id": 1, "displayName": "Test Field"},
+    ]
+
+    field_file = tmp_path / "Test_Field.yaml"
+    field_file.write_text(
+        yaml.dump({
+            "name": "projects//locations//instances//customFields/1",
+            "displayName": "Test Field",
+            "type": "String",
+        })
+    )
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(push_app, ["custom-field", "Test Field"])
+
+    assert result.exit_code == 0
+    mock_api.update_custom_field.assert_called_once_with(
+        1,
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "displayName": "Test Field",
+            "type": "String",
+            "id": 1,
+        },
+    )
+    mock_api.create_custom_field.assert_not_called()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.push.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.push.get_backend_api")
+def test_push_custom_field_create(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = []
+
+    field_file = tmp_path / "New_Field.yaml"
+    field_file.write_text(
+        yaml.dump({
+            "name": "projects//locations//instances//customFields/new",
+            "displayName": "New Field",
+            "type": "String",
+        })
+    )
+
+    result = runner.invoke(push_app, ["custom-field", str(field_file), "--force"])
+
+    assert result.exit_code == 0
+    mock_api.create_custom_field.assert_called_once_with(
+        {"name": "projects//locations//instances//customFields/new", "displayName": "New Field", "type": "String"},
+    )
+    mock_api.update_custom_field.assert_not_called()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_custom_field_with_custom_missing_dirs(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {"name": "projects//locations//instances//customFields/1", "id": 1, "displayName": "Test Field"},
+    ]
+
+    mock_api.download_custom_field.return_value = {
+        "name": "projects//locations//instances//customFields/1",
+        "id": 1,
+        "displayName": "Test Field",
+        "type": "String",
+    }
+
+    custom_dir = tmp_path / "missing" / "dirs"
+    custom_path = custom_dir / "field.yaml"
+
+    result = runner.invoke(pull_app, ["custom-field", "Test Field", "--custom", str(custom_path)])
+
+    assert result.exit_code == 0
+    mock_api.download_custom_field.assert_called_once_with(1)
+    assert custom_path.exists()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_custom_field_multiple_matches(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Test Field",
+            "scopes": "Case",
+        },
+    ]
+
+    mock_api.download_custom_field.side_effect = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Test Field",
+            "scopes": "Case",
+        },
+    ]
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(pull_app, ["custom-field", "Test Field"])
+
+    assert result.exit_code == 0
+    assert mock_api.download_custom_field.call_count == 2
+    mock_api.download_custom_field.assert_any_call(1)
+    mock_api.download_custom_field.assert_any_call(2)
+
+    assert (tmp_path / "alert" / "Test_Field_alert.yaml").exists()
+    assert (tmp_path / "case" / "Test_Field_case.yaml").exists()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_custom_field_multiple_matches_error_if_destination(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Test Field",
+            "scopes": "Case",
+        },
+    ]
+
+    custom_path = tmp_path / "out.yaml"
+
+    result = runner.invoke(pull_app, ["custom-field", "Test Field", "--custom", str(custom_path)])
+
+    assert result.exit_code == 1
+    mock_api.download_custom_field.assert_not_called()
+    assert not custom_path.exists()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_custom_field_path_based(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Test Field",
+            "scopes": "Case",
+        },
+    ]
+
+    mock_api.download_custom_field.return_value = {
+        "name": "projects//locations//instances//customFields/2",
+        "id": 2,
+        "displayName": "Test Field",
+        "scopes": "Case",
+        "description": "Updated",
+    }
+
+    local_file = tmp_path / "Test_Field_case.yaml"
+    local_file.write_text(
+        yaml.dump({
+            "displayName": "Test Field",
+            "scopes": "Case",
+            "description": "Old",
+        })
+    )
+
+    result = runner.invoke(pull_app, ["custom-field", str(local_file)])
+
+    assert result.exit_code == 0
+    mock_api.download_custom_field.assert_called_once_with(2)
+
+    with local_file.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+        assert data["description"] == "Updated"
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.push.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.push.get_backend_api")
+def test_push_custom_field_multiple_matching_files(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Test Field",
+            "scopes": "Case",
+        },
+    ]
+
+    file1 = tmp_path / "Test_Field_alert.yaml"
+    file1.write_text(
+        yaml.dump({
+            "displayName": "Test Field",
+            "scopes": "Alert",
+            "description": "Alert Desc",
+        })
+    )
+
+    file2 = tmp_path / "Test_Field_case.yaml"
+    file2.write_text(
+        yaml.dump({
+            "displayName": "Test Field",
+            "scopes": "Case",
+            "description": "Case Desc",
+        })
+    )
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(push_app, ["custom-field", "Test Field"])
+
+    assert result.exit_code == 0
+    assert mock_api.update_custom_field.call_count == 2
+    mock_api.update_custom_field.assert_any_call(
+        1,
+        {
+            "displayName": "Test Field",
+            "scopes": "Alert",
+            "description": "Alert Desc",
+            "id": 1,
+            "name": "projects//locations//instances//customFields/1",
+        },
+    )
+    mock_api.update_custom_field.assert_any_call(
+        2,
+        {
+            "displayName": "Test Field",
+            "scopes": "Case",
+            "description": "Case Desc",
+            "id": 2,
+            "name": "projects//locations//instances//customFields/2",
+        },
+    )
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_custom_field_list(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+    ]
+
+    with caplog.at_level("INFO"):
+        result = runner.invoke(pull_app, ["custom-field", "--list"])
+
+    assert result.exit_code == 0
+    assert "DisplayName: 'Test Field' (Scopes: Alert)" in caplog.text
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_custom_field_by_suffix(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Test Field",
+            "scopes": "Case",
+        },
+    ]
+
+    mock_api.download_custom_field.return_value = {
+        "name": "projects//locations//instances//customFields/1",
+        "id": 1,
+        "displayName": "Test Field",
+        "scopes": "Alert",
+    }
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(pull_app, ["custom-field", "Test_Field_alert"])
+
+    assert result.exit_code == 0
+    mock_api.download_custom_field.assert_called_once_with(1)
+    assert (tmp_path / "alert" / "Test_Field_alert.yaml").exists()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_custom_field_with_scope_option(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Test Field",
+            "scopes": "Case",
+        },
+    ]
+
+    mock_api.download_custom_field.return_value = {
+        "name": "projects//locations//instances//customFields/2",
+        "id": 2,
+        "displayName": "Test Field",
+        "scopes": "Case",
+    }
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(pull_app, ["custom-field", "Test Field", "--scope", "case"])
+
+    assert result.exit_code == 0
+    mock_api.download_custom_field.assert_called_once_with(2)
+    assert (tmp_path / "case" / "Test_Field_case.yaml").exists()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.push.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.push.get_backend_api")
+def test_push_custom_field_with_scope_option(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Test Field",
+            "scopes": "Case",
+        },
+    ]
+
+    file1 = tmp_path / "Test_Field_alert.yaml"
+    file1.write_text(
+        yaml.dump({
+            "displayName": "Test Field",
+            "scopes": "Alert",
+            "description": "Alert Desc",
+        })
+    )
+
+    file2 = tmp_path / "Test_Field_case.yaml"
+    file2.write_text(
+        yaml.dump({
+            "displayName": "Test Field",
+            "scopes": "Case",
+            "description": "Case Desc",
+        })
+    )
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(push_app, ["custom-field", "Test Field", "--scope", "alert"])
+
+    assert result.exit_code == 0
+    mock_api.update_custom_field.assert_called_once_with(
+        1,
+        {
+            "displayName": "Test Field",
+            "scopes": "Alert",
+            "description": "Alert Desc",
+            "id": 1,
+            "name": "projects//locations//instances//customFields/1",
+        },
+    )
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_custom_field_overwrites_matching_renamed_file(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+    ]
+
+    mock_api.download_custom_field.return_value = {
+        "name": "projects//locations//instances//customFields/1",
+        "id": 1,
+        "displayName": "Test Field",
+        "scopes": "Alert",
+        "description": "Downloaded Description",
+    }
+
+    # Create a local file with a different name but matching displayName and scope
+    local_file = tmp_path / "Test_Field_alertss.yaml"
+    local_file.write_text(
+        yaml.dump({
+            "displayName": "Test Field",
+            "scopes": "Alert",
+            "description": "Old Local Description",
+        })
+    )
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(pull_app, ["custom-field", "Test Field"])
+
+    assert result.exit_code == 0
+    mock_api.download_custom_field.assert_called_once_with(1)
+
+    # Verify that the renamed file was updated instead of generating Test_Field_alert.yaml
+    assert local_file.exists()
+    with local_file.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+        assert data["description"] == "Downloaded Description"
+
+    assert not (tmp_path / "alert" / "Test_Field_alert.yaml").exists()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_custom_field_by_local_filename_without_suffix(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Test Field",
+            "scopes": "Alert",
+        },
+    ]
+
+    mock_api.download_custom_field.return_value = {
+        "name": "projects//locations//instances//customFields/1",
+        "id": 1,
+        "displayName": "Test Field",
+        "scopes": "Alert",
+        "description": "Downloaded Description",
+    }
+
+    # Create a local file with a custom name
+    local_file = tmp_path / "Test_Field_alertss.yaml"
+    local_file.write_text(
+        yaml.dump({
+            "displayName": "Test Field",
+            "scopes": "Alert",
+            "description": "Old Local Description",
+        })
+    )
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(pull_app, ["custom-field", "Test_Field_alertss"])
+
+    assert result.exit_code == 0
+    mock_api.download_custom_field.assert_called_once_with(1)
+
+    # Verify that the custom renamed file was updated
+    assert local_file.exists()
+    with local_file.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+        assert data["description"] == "Downloaded Description"
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_all_custom_fields_with_scope_filtering(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Field 1",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Field 2",
+            "scopes": "Case",
+        },
+        {
+            "name": "projects//locations//instances//customFields/3",
+            "id": 3,
+            "displayName": "Field 3",
+            "scopes": ["Alert", "Case"],
+        },
+    ]
+
+    mock_api.download_custom_field.side_effect = lambda x: {
+        "name": f"projects//locations//instances//customFields/{x}",
+        "id": x,
+        "displayName": f"Field {x}",
+        "scopes": "Case" if x == 2 else ["Alert", "Case"],
+    }
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(pull_app, ["custom-field", "--all", "--scope", "case"])
+
+    assert result.exit_code == 0
+    # Field 1 (Alert scope only) should NOT be downloaded
+    # Field 2 (Case) and Field 3 (Alert/Case) should be downloaded
+    assert mock_api.download_custom_field.call_count == 2
+    mock_api.download_custom_field.assert_any_call(2)
+    mock_api.download_custom_field.assert_any_call(3)
+
+    assert (tmp_path / "case" / "Field_2_case.yaml").exists()
+    assert (tmp_path / "shared" / "Field_3_alert_case.yaml").exists()
+    assert not (tmp_path / "alert" / "Field_1_alert.yaml").exists()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_all_custom_fields_or_scope_matching(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Field 1",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Field 2",
+            "scopes": "Case",
+        },
+        {
+            "name": "projects//locations//instances//customFields/3",
+            "id": 3,
+            "displayName": "Field 3",
+            "scopes": ["Alert", "Case"],
+        },
+    ]
+
+    mock_api.download_custom_field.side_effect = lambda x: {
+        "name": f"projects//locations//instances//customFields/{x}",
+        "id": x,
+        "displayName": f"Field {x}",
+        "scopes": "Alert" if x == 1 else ("Case" if x == 2 else ["Alert", "Case"]),
+    }
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(pull_app, ["custom-field", "--all", "--scope", "alert,case"])
+
+    assert result.exit_code == 0
+    # Field 1, Field 2, Field 3 should all be downloaded (OR condition)
+    assert mock_api.download_custom_field.call_count == 3
+    mock_api.download_custom_field.assert_any_call(1)
+    mock_api.download_custom_field.assert_any_call(2)
+    mock_api.download_custom_field.assert_any_call(3)
+
+    assert (tmp_path / "alert" / "Field_1_alert.yaml").exists()
+    assert (tmp_path / "case" / "Field_2_case.yaml").exists()
+    assert (tmp_path / "shared" / "Field_3_alert_case.yaml").exists()
+
+
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.load_dev_env_config")
+@mock.patch("mp.dev_env.sub_commands.custom_field.pull.get_backend_api")
+def test_pull_all_custom_fields_shared_scope(
+    mock_get_backend_api: mock.MagicMock,
+    mock_load_config: mock.MagicMock,
+    tmp_path: Path,
+) -> None:
+    mock_api = mock.MagicMock()
+    mock_get_backend_api.return_value = mock_api
+
+    mock_api.list_custom_fields.return_value = [
+        {
+            "name": "projects//locations//instances//customFields/1",
+            "id": 1,
+            "displayName": "Field 1",
+            "scopes": "Alert",
+        },
+        {
+            "name": "projects//locations//instances//customFields/2",
+            "id": 2,
+            "displayName": "Field 2",
+            "scopes": "Case",
+        },
+        {
+            "name": "projects//locations//instances//customFields/3",
+            "id": 3,
+            "displayName": "Field 3",
+            "scopes": ["Alert", "Case"],
+        },
+    ]
+
+    mock_api.download_custom_field.return_value = {
+        "name": "projects//locations//instances//customFields/3",
+        "id": 3,
+        "displayName": "Field 3",
+        "scopes": ["Alert", "Case"],
+    }
+
+    with mock.patch(
+        "mp.core.file_utils.create_or_get_custom_fields_root_dir",
+        return_value=tmp_path,
+    ):
+        result = runner.invoke(pull_app, ["custom-field", "--all", "--scope", "shared"])
+
+    assert result.exit_code == 0
+    # ONLY Field 3 (which has both alert and case scopes) should be downloaded
+    assert mock_api.download_custom_field.call_count == 1
+    mock_api.download_custom_field.assert_called_once_with(3)
+
+    assert (tmp_path / "shared" / "Field_3_alert_case.yaml").exists()
+    assert not (tmp_path / "alert" / "Field_1_alert.yaml").exists()
+    assert not (tmp_path / "case" / "Field_2_case.yaml").exists()
+
+
+def test_backend_api_list_custom_fields_pagination() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp_page_1 = mock.MagicMock()
+    resp_page_1.ok = True
+    resp_page_1.status_code = HTTPStatus.OK
+    resp_page_1.json.return_value = {
+        "customFields": [{"id": i, "displayName": f"Field {i}"} for i in range(1, 51)],
+        "nextPageToken": "token_page_2",
+    }
+
+    resp_page_2 = mock.MagicMock()
+    resp_page_2.ok = True
+    resp_page_2.status_code = HTTPStatus.OK
+    resp_page_2.json.return_value = {
+        "customFields": [{"id": i, "displayName": f"Field {i}"} for i in range(51, 81)],
+        "nextPageToken": None,
+    }
+
+    api.session.get.side_effect = [resp_page_1, resp_page_2]
+
+    fields = api.list_custom_fields()
+    assert len(fields) == 80
+    assert api.session.get.call_count == 2
+    api.session.get.assert_any_call("https://soar.test/api/1p/external/v1/customFields", params={})
+    api.session.get.assert_any_call(
+        "https://soar.test/api/1p/external/v1/customFields", params={"pageToken": "token_page_2"}
+    )
+
+
+def test_backend_api_list_installed_integrations_pagination() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp = mock.MagicMock()
+    resp.ok = True
+    resp.status_code = HTTPStatus.OK
+    resp.json.return_value = {
+        "integrations": [{"identifier": "Integration1"}, {"identifier": "Integration2"}],
+        "nextPageToken": None,
+    }
+
+    api.session.get.return_value = resp
+
+    integrations = api.list_installed_integrations()
+    assert len(integrations) == 2
+    assert integrations[0]["identifier"] == "Integration1"
+    api.session.get.assert_called_once_with(
+        "https://soar.test/api/1p/external/v1/integrations",
+        params={},
+    )
+
+
+def test_backend_api_list_integration_instances_pagination() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp = mock.MagicMock()
+    resp.ok = True
+    resp.status_code = HTTPStatus.OK
+    resp.json.return_value = {
+        "integrationInstances": [{"identifier": "Instance1"}],
+        "nextPageToken": None,
+    }
+
+    api.session.get.return_value = resp
+
+    instances = api.list_integration_instances("Integration1")
+    assert len(instances) == 1
+    assert instances[0]["identifier"] == "Instance1"
+    api.session.get.assert_called_once_with(
+        "https://soar.test/api/1p/external/v1/integrations/Integration1/integrationInstances",
+        params={},
+    )
+
+
+def test_backend_api_list_alert_grouping_rules_pagination() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp = mock.MagicMock()
+    resp.ok = True
+    resp.status_code = HTTPStatus.OK
+    resp.json.return_value = {
+        "alertGroupingRules": [{"id": 10, "ruleName": "Rule 1"}],
+        "nextPageToken": None,
+    }
+
+    api.session.get.return_value = resp
+
+    rules = api.list_alert_grouping_rules()
+    assert len(rules) == 1
+    assert rules[0]["ruleName"] == "Rule 1"
+    api.session.get.assert_called_once_with(
+        "https://soar.test/api/1p/external/v1/system/settings/alert-grouping-rules",
+        params={},
+    )
+
+
+def test_backend_api_list_custom_fields_cyclical_page_token() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp_page_1 = mock.MagicMock()
+    resp_page_1.ok = True
+    resp_page_1.status_code = HTTPStatus.OK
+    resp_page_1.json.return_value = {
+        "customFields": [{"id": 1, "displayName": "Field 1"}],
+        "nextPageToken": "token_repeat",
+    }
+
+    resp_page_2 = mock.MagicMock()
+    resp_page_2.ok = True
+    resp_page_2.status_code = HTTPStatus.OK
+    resp_page_2.json.return_value = {
+        "customFields": [{"id": 2, "displayName": "Field 2"}],
+        "nextPageToken": "token_repeat",
+    }
+
+    api.session.get.side_effect = [resp_page_1, resp_page_2]
+
+    fields = api.list_custom_fields()
+    assert len(fields) == 2
+    assert api.session.get.call_count == 2
+
+
+def test_backend_api_paginate_1p_get_null_items() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp = mock.MagicMock()
+    resp.ok = True
+    resp.status_code = HTTPStatus.OK
+    resp.json.return_value = {"customFields": None, "nextPageToken": None}
+
+    api.session.get.return_value = resp
+
+    fields = api.list_custom_fields()
+    assert fields == []
+
+
+def test_backend_api_paginate_1p_get_no_content_204() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp = mock.MagicMock()
+    resp.ok = True
+    resp.status_code = HTTPStatus.NO_CONTENT
+
+    api.session.get.return_value = resp
+
+    fields = api.list_custom_fields()
+    assert fields == []
+
+
+def test_backend_api_paginate_1p_get_custom_root_key_and_page_size() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp = mock.MagicMock()
+    resp.ok = True
+    resp.status_code = HTTPStatus.OK
+    resp.json.return_value = {
+        "customLists": [{"id": 1, "name": "List 1"}],
+        "nextPageToken": None,
+    }
+
+    api.session.get.return_value = resp
+
+    result = api._paginate_1p_get(  # ruff:ignore[private-member-access]
+        "https://soar.test/api/1p/external/v1/customLists",
+        root_response_key="customLists",
+        page_size=50,
+    )
+    assert result == [{"id": 1, "name": "List 1"}]
+    api.session.get.assert_called_once_with(
+        "https://soar.test/api/1p/external/v1/customLists",
+        params={"pageSize": 50},
+    )
+
+
+def test_backend_api_paginate_1p_get_max_pages() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp_page_1 = mock.MagicMock()
+    resp_page_1.ok = True
+    resp_page_1.status_code = HTTPStatus.OK
+    resp_page_1.json.return_value = {
+        "items": [{"id": 1}],
+        "nextPageToken": "token_page_2",
+    }
+
+    api.session.get.return_value = resp_page_1
+
+    result = api._paginate_1p_get(  # ruff:ignore[private-member-access]
+        "https://soar.test/api/1p/external/v1/customFields",
+        max_pages=1,
+    )
+    assert result == [{"id": 1}]
+    assert api.session.get.call_count == 1
+
+
+def test_backend_api_paginate_1p_get_custom_tokens() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp_page_1 = mock.MagicMock()
+    resp_page_1.ok = True
+    resp_page_1.status_code = HTTPStatus.OK
+    resp_page_1.json.return_value = {
+        "items": [{"id": 1}],
+        "next_token": "token_page_2",
+    }
+
+    resp_page_2 = mock.MagicMock()
+    resp_page_2.ok = True
+    resp_page_2.status_code = HTTPStatus.OK
+    resp_page_2.json.return_value = {
+        "items": [{"id": 2}],
+        "next_token": None,
+    }
+
+    api.session.get.side_effect = [resp_page_1, resp_page_2]
+
+    result = api._paginate_1p_get(  # ruff:ignore[private-member-access]
+        "https://soar.test/api/1p/external/v1/customFields",
+        token_param_key="page_token",  # ruff:ignore[hardcoded-password-func-arg]
+        token_response_key="next_token",  # ruff:ignore[hardcoded-password-func-arg]
+    )
+    assert result == [{"id": 1}, {"id": 2}]
+    api.session.get.assert_any_call("https://soar.test/api/1p/external/v1/customFields", params={})
+    api.session.get.assert_any_call(
+        "https://soar.test/api/1p/external/v1/customFields", params={"page_token": "token_page_2"}
+    )
+
+
+def test_backend_api_paginate_1p_get_stream_yields_dicts_only() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp = mock.MagicMock()
+    resp.ok = True
+    resp.status_code = HTTPStatus.OK
+    resp.json.return_value = {
+        "items": [{"id": 1}, "invalid_string", None, {"id": 2}],
+        "nextPageToken": None,
+    }
+
+    api.session.get.return_value = resp
+
+    stream = api._paginate_1p_get_stream("https://soar.test/api/1p/external/v1/customFields")  # ruff:ignore[private-member-access]
+    assert list(stream) == [{"id": 1}, {"id": 2}]
+
+
+def test_backend_api_paginate_1p_get_json_decode_error() -> None:
+    api = BackendAPI(api_root="https://soar.test", api_key="test_key")
+    api.session = mock.MagicMock()
+
+    resp = mock.MagicMock()
+    resp.ok = True
+    resp.status_code = HTTPStatus.OK
+    resp.text = "invalid json"
+    resp.json.side_effect = requests.exceptions.JSONDecodeError("Expecting value", "doc", 0)
+
+    api.session.get.return_value = resp
+
+    with pytest.raises(requests.exceptions.JSONDecodeError):
+        api.list_custom_fields()
