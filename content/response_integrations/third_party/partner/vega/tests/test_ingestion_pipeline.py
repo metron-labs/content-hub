@@ -21,6 +21,7 @@ class FakeManager:
         self.timelines: dict[str, list] = {}
         self.incident_by_id: dict[str, dict] = {}
         self.alert_calls: list[dict] = []
+        self.alert_fetch_limits: list = []
         self.incident_calls: list[dict] = []
         self.event_calls: list[str] = []
         self.event_batch_calls: list[list[str]] = []
@@ -37,6 +38,7 @@ class FakeManager:
     def get_alerts(self, variables, max_records=None, deadline_monotonic=None, **_kwargs):
         variables = dict(variables or {})
         self.alert_calls.append(variables)
+        self.alert_fetch_limits.append(max_records)
         alert_ids = {str(item) for item in (variables.get("alertIds") or []) if item}
         vega_ids = {str(item) for item in (variables.get("vegaAlertIds") or []) if item}
         lookup_ids = alert_ids | vega_ids
@@ -108,6 +110,7 @@ def _pipeline(
     has_related: str = "Yes,No",
     max_fetch: int = 20,
     max_alerts_per_case: int = 90,
+    fetch_related_alert_metadata: bool = False,
 ):
     return IngestionPipeline(
         manager=manager,
@@ -115,6 +118,7 @@ def _pipeline(
         lookback_minutes="5",
         backfill_days="0",
         has_related=has_related,
+        fetch_related_alert_metadata=fetch_related_alert_metadata,
         max_fetch=max_fetch,
         max_alerts_per_case=max_alerts_per_case,
     )
@@ -1234,3 +1238,146 @@ def test_uuid_stubs_are_not_retried_as_vega_alert_ids() -> None:
     _pipeline(manager, entities="Alerts,Incidents", has_related="Yes").run()
     assert not any(call.get("vegaAlertIds") for call in manager.alert_calls)
     assert any(uuid in (call.get("alertIds") or []) for call in manager.alert_calls)
+
+
+def _metadata_uuid(index: int) -> str:
+    return f"019e1b27-5119-7822-bde3-{index:012d}"
+
+
+def test_vega_alerts_stays_get_incidents_stub_when_metadata_disabled() -> None:
+    uuid = _metadata_uuid(1)
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "alerts": [
+                {
+                    "alertId": uuid,
+                    "name": "Phish",
+                    "createdAt": "2024-01-15T09:30:00Z",
+                    "severity": "HIGH",
+                }
+            ],
+        }
+    ]
+    manager.alerts = [
+        {
+            "id": uuid,
+            "name": "Phish",
+            "detectionId": "det-1",
+            "detectionQuery": "index=proxy",
+        }
+    ]
+    summary = _pipeline(manager, entities="Incidents", has_related="No").run()
+    incident = summary["records"][0][1]
+    assert incident["vega_alerts"] == [
+        {
+            "alertId": uuid,
+            "name": "Phish",
+            "createdAt": "2024-01-15T09:30:00Z",
+        }
+    ]
+    assert incident["alerts"][0]["severity"] == "HIGH"
+    assert manager.alert_calls == []
+
+
+def test_vega_alerts_loads_full_metadata_when_enabled() -> None:
+    uuid = _metadata_uuid(2)
+    missing = _metadata_uuid(3)
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "alerts": [
+                {"alertId": uuid, "name": "Phish", "createdAt": "2024-01-15T09:30:00Z"},
+                {"alertId": missing, "name": "Gone", "createdAt": "2024-01-16T09:30:00Z"},
+            ],
+        }
+    ]
+    manager.alerts = [
+        {
+            "id": uuid,
+            "name": "Phish",
+            "detectionId": "det-1",
+            "detectionSource": "splunk",
+            "detectionDescription": "proxy beacon",
+            "detectionQuery": "index=proxy",
+            "status": "OPEN",
+            "verdict": "MALICIOUS",
+        }
+    ]
+    summary = _pipeline(
+        manager,
+        entities="Incidents",
+        has_related="No",
+        fetch_related_alert_metadata=True,
+    ).run()
+    incident = summary["records"][0][1]
+    assert len(summary["records"]) == 1
+    assert incident["alerts"][0] == {
+        "alertId": uuid,
+        "name": "Phish",
+        "createdAt": "2024-01-15T09:30:00Z",
+    }
+    full = incident["vega_alerts"][0]
+    assert full["detectionId"] == "det-1"
+    assert full["detectionQuery"] == "index=proxy"
+    assert full["verdict"] == "MALICIOUS"
+    assert incident["vega_alerts"][1] == {
+        "alertId": missing,
+        "name": "Gone",
+        "createdAt": "2024-01-16T09:30:00Z",
+    }
+    assert len(manager.alert_calls) == 1
+    call = manager.alert_calls[0]
+    assert call["alertIds"] == [uuid, missing]
+    assert call["from"]
+    assert "alertSeverities" not in call
+    assert manager.alert_fetch_limits == [2]
+
+
+def test_vega_alerts_sends_human_ids_as_vega_alert_ids() -> None:
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "alerts": [{"alertId": "VEGA-9", "name": "Phish"}],
+        }
+    ]
+    manager.alerts = [{"id": "ignored", "vegaAlertId": "VEGA-9", "detectionId": "det-9"}]
+    summary = _pipeline(
+        manager, entities="Incidents", fetch_related_alert_metadata=True
+    ).run()
+    assert manager.alert_calls[0]["vegaAlertIds"] == ["VEGA-9"]
+    assert "alertIds" not in manager.alert_calls[0]
+    assert summary["records"][0][1]["vega_alerts"][0]["detectionId"] == "det-9"
+
+
+def test_vega_alerts_batches_one_thousand_uuids_per_request() -> None:
+    from core.constants import ALERT_METADATA_ID_BATCH
+
+    ids = [_metadata_uuid(index) for index in range(ALERT_METADATA_ID_BATCH + 1)]
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "alerts": [{"alertId": item} for item in ids],
+        }
+    ]
+    summary = _pipeline(
+        manager, entities="Incidents", fetch_related_alert_metadata=True
+    ).run()
+    assert [len(call["alertIds"]) for call in manager.alert_calls] == [
+        ALERT_METADATA_ID_BATCH,
+        1,
+    ]
+    assert manager.alert_fetch_limits == [ALERT_METADATA_ID_BATCH, 1]
+    assert len(summary["records"][0][1]["vega_alerts"]) == ALERT_METADATA_ID_BATCH + 1

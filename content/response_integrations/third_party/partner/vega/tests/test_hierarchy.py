@@ -514,6 +514,66 @@ def test_incident_event_maps_get_incidents_fields() -> None:
         assert key not in event, key
     assert "vega_recommended_action_keys" not in event
     assert "vega_reset_password_user" not in event
+    assert event["vega_alerts"] == "[]"
+    assert event["vega_related_alert_ids"] == "[]"
+    assert "alerts" not in event
+
+
+def test_incident_event_maps_get_incidents_alert_stubs_onto_vega_alerts() -> None:
+    event = build_event_dict(
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "alerts": [
+                {
+                    "alertId": "019e1b27-5119-7822-bde3-344b13e481cf",
+                    "name": "Phish",
+                    "createdAt": "2024-01-15T09:30:00Z",
+                }
+            ],
+        },
+        ENTITY_TYPE_INCIDENT,
+        1,
+        1,
+    )
+    assert "alerts" not in event
+    assert json.loads(event["vega_alerts"]) == [
+        {
+            "alertId": "019e1b27-5119-7822-bde3-344b13e481cf",
+            "name": "Phish",
+            "createdAt": "2024-01-15T09:30:00Z",
+        }
+    ]
+    assert event["vega_related_alert_ids"] == "019e1b27-5119-7822-bde3-344b13e481cf"
+
+
+def test_incident_event_maps_vega_alerts_without_copying_into_details() -> None:
+    event = build_event_dict(
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "alerts": [{"alertId": "stub-1", "name": "Phish"}],
+            "vega_alerts": [
+                {
+                    "id": "019e1b27-5119-7822-bde3-344b13e481cf",
+                    "detectionId": "det-1",
+                    "detectionQuery": "index=proxy",
+                    "verdict": "MALICIOUS",
+                }
+            ],
+        },
+        ENTITY_TYPE_INCIDENT,
+        1,
+        1,
+    )
+    parsed = json.loads(event["vega_alerts"])
+    assert parsed[0]["detectionId"] == "det-1"
+    assert parsed[0]["detectionQuery"] == "index=proxy"
+    assert event["vega_related_alert_ids"] == "019e1b27-5119-7822-bde3-344b13e481cf"
+    assert "alerts" not in event
+    details = json.loads(event["details"])
+    assert "vega_alerts" not in details
+    assert details["alerts"] == [{"alertId": "stub-1", "name": "Phish"}]
 
 
 def test_incident_event_extracts_okta_reset_user_from_recommended_actions() -> None:

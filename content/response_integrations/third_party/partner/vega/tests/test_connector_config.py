@@ -273,3 +273,38 @@ def test_get_incidents_stops_paging_when_deadline_passes() -> None:
     assert len(records) == GRAPHQL_PAGE_SIZE
     assert manager.last_fetch_truncated is True
     assert len(calls) == 1
+
+
+def test_get_alerts_pages_alert_id_lookup() -> None:
+    manager = VegaManager(
+        api_root="https://api.vega.io",
+        access_key_id="kid",
+        access_key="secret",
+        session=DummySession(),
+        sleeper=lambda _seconds: None,
+    )
+    manager._jwt = "token"
+    calls: list[dict] = []
+
+    def _graphql(_query, variables=None):
+        variables = dict(variables or {})
+        calls.append(variables)
+        limit = int(variables.get("limit") or GRAPHQL_PAGE_SIZE)
+        offset = int(variables.get("offset") or 0)
+        return {
+            "getAlerts": {
+                "alerts": [{"id": f"a-{offset + index}"} for index in range(limit)],
+                "total": 120,
+                "limit": limit,
+                "offset": offset,
+            }
+        }
+
+    manager.graphql = _graphql
+    records = manager.get_alerts({"alertIds": ["019e1b27-5119-7822-bde3-344b13e481cf"]}, 120)
+    assert len(records) == 120
+    assert [call["offset"] for call in calls] == [0, GRAPHQL_PAGE_SIZE, GRAPHQL_PAGE_SIZE * 2]
+    assert [call["limit"] for call in calls] == [GRAPHQL_PAGE_SIZE, GRAPHQL_PAGE_SIZE, 20]
+    assert all(
+        call["alertIds"] == ["019e1b27-5119-7822-bde3-344b13e481cf"] for call in calls
+    )

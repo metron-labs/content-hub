@@ -69,6 +69,9 @@ NESTED_RELATED_KEY = "nested_related_alerts"
 MAX_ALERTS_PER_CASE = 90
 SYNC_RESOLVED_STATUS = "RESOLVED"
 ALERT_ID_LOOKUP_BATCH = 10
+# getAlerts(alertIds) for incident metadata. One request may carry this many
+# UUIDs; the response is still paged with limit/offset.
+ALERT_METADATA_ID_BATCH = 1000
 TIMELINE_PAGE_SIZE = 100
 TIMELINE_MAX_FETCH = 2500
 TEST_RUN_MAX_FETCH = 5
@@ -103,6 +106,7 @@ PARAM_INCIDENT_SEVERITIES = "Incident Severities to Fetch"
 PARAM_INCIDENT_USER_STATUSES = "Incident User Statuses to Fetch"
 PARAM_INCIDENT_INVESTIGATION_STATUSES = "Incident Investigation Statuses to Fetch"
 PARAM_INCIDENT_VERDICTS = "Incident Verdicts to Fetch"
+PARAM_FETCH_RELATED_ALERT_METADATA = "Fetch Related Alert Metadata"
 PARAM_SYNC = "Sync Case Close to Vega"
 PARAM_PYTHON_TIMEOUT = "PythonProcessTimeout"
 PYTHON_TIMEOUT_MIN = 30

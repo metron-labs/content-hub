@@ -122,6 +122,19 @@ parameters:
     is_mandatory: false
     is_advanced: true
     mode: script
+-   name: Fetch Related Alert Metadata
+    default_value: 'false'
+    type: boolean
+    description: When enabled, the incident event field vega_alerts is the full
+        getAlerts metadata for related alerts. Alert UUIDs are sent in batches
+        of up to 1000 per request, and each response is paged until those alerts
+        are returned. When disabled, vega_alerts is only alertId, name, and
+        createdAt from getIncidents. vega_related_alert_ids lists those ids.
+        The event field is not named alerts, because SecOps reserves that name.
+        This does not create extra SOAR cases.
+    is_mandatory: false
+    is_advanced: true
+    mode: script
 -   name: Sync Case Close to Vega
     default_value: 'true'
     type: boolean

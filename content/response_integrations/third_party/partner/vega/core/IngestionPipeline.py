@@ -19,7 +19,13 @@ Connector flow
      No:     incident-only case; unrelated alerts as their own cases.
 
    Incidents only (Yes, No, or Yes,No): incident-only cases. Do not fetch
-     related or unrelated alerts.
+     related or unrelated alerts as their own cases.
+
+   Fetch Related Alert Metadata: when enabled, each incident's vega_alerts
+   field is the full getAlerts record for every nested alert id (up to 1000
+   UUIDs per request; the response is paged until those alerts return). When
+   disabled, vega_alerts is only alertId, name, and createdAt from
+   getIncidents. This does not create related-alert cases.
 
    Alerts only
      Yes,No: standalone cases for related alerts and unrelated alerts.
@@ -39,6 +45,7 @@ from .constants import (
     ALERT_EVENTS_ID_BATCH,
     ALERT_ID_LOOKUP_BATCH,
     ALERT_ID_LOOKUP_FROM,
+    ALERT_METADATA_ID_BATCH,
     ENTITY_TYPE_ALERT,
     ENTITY_TYPE_INCIDENT,
     INGESTED_ID_CAP,
@@ -54,6 +61,7 @@ from .mapping import (
     collect_label_tags,
     incident_alert_ids,
     incident_alert_stubs,
+    incident_alert_summary,
     incident_case_title,
     incident_grouping_id,
     index_alert_records,
@@ -104,6 +112,7 @@ class IngestionPipeline:
         incident_user_statuses: str = "",
         incident_investigation_statuses: str = "",
         incident_verdicts: str = "",
+        fetch_related_alert_metadata: bool = False,
         max_fetch: Optional[int] = None,
         max_alerts_per_case: int = MAX_ALERTS_PER_CASE,
         logger_instance=None,
@@ -122,6 +131,7 @@ class IngestionPipeline:
                 "has_related": has_related,
             }
         )
+        self.fetch_related_alert_metadata = bool(fetch_related_alert_metadata)
         self.incident_filters = resolve_incident_filters(
             {
                 "incident_severities": incident_severities,
@@ -426,6 +436,130 @@ class IngestionPipeline:
             "updated_from": ALERT_ID_LOOKUP_FROM,
             "updated_to": end,
         }
+
+    def _metadata_lookup_ids(self, incident: dict) -> list[str]:
+        """One id per nested alert. UUID alertId is preferred for getAlerts."""
+        ids: list[str] = []
+        seen: set[str] = set()
+        for stub in incident_alert_stubs(incident):
+            candidates = record_alert_ids(stub)
+            chosen = ""
+            for candidate in candidates:
+                if is_graphql_alert_id(candidate):
+                    chosen = candidate
+                    break
+            if not chosen and candidates:
+                chosen = candidates[0]
+            if not chosen or chosen in seen:
+                continue
+            seen.add(chosen)
+            ids.append(chosen)
+        return ids
+
+    def _fetch_alert_metadata_index(
+        self, alert_ids: list[str], window: dict
+    ) -> dict[str, dict]:
+        """Load full getAlerts rows for incident alert ids.
+
+        UUID ids go in alertIds, at most 1000 per request. getAlerts pages
+        the response with limit/offset until that batch is collected. Human
+        ids use vegaAlertIds so a non-UUID cannot fail the UUID batch.
+        """
+        graphql_ids = [item for item in alert_ids if is_graphql_alert_id(item)]
+        other_ids = [item for item in alert_ids if item not in graphql_ids]
+        if not graphql_ids and not other_ids:
+            return {}
+        collected: list[dict] = []
+        batch_size = max(1, int(ALERT_METADATA_ID_BATCH))
+        lookup_window = self._id_lookup_window(window)
+
+        def _lookup(batch: list[str], *, use_alert_ids: bool) -> list[dict]:
+            key = "alertIds" if use_alert_ids else "vegaAlertIds"
+            try:
+                if use_alert_ids:
+                    variables = self._alert_variables(
+                        lookup_window, None, alert_ids=batch
+                    )
+                else:
+                    variables = self._alert_variables(
+                        lookup_window, None, vega_alert_ids=batch
+                    )
+                page = self.manager.get_alerts(
+                    variables, len(batch), deadline_monotonic=self._deadline
+                )
+                self._mark_if_truncated()
+            except Exception as exc:
+                self._log(
+                    "warning",
+                    "Unable to fetch related-alert metadata by %s: %s",
+                    key,
+                    exc,
+                )
+                return []
+            return [item for item in page if isinstance(item, dict)]
+
+        def _lookup_batches(ids: list[str], *, use_alert_ids: bool) -> None:
+            for index in range(0, len(ids), batch_size):
+                if self._deadline_reached():
+                    self._incomplete = True
+                    return
+                collected.extend(
+                    _lookup(
+                        ids[index : index + batch_size],
+                        use_alert_ids=use_alert_ids,
+                    )
+                )
+
+        _lookup_batches(graphql_ids, use_alert_ids=True)
+        _lookup_batches(other_ids, use_alert_ids=False)
+        self._log(
+            "info",
+            "Fetched %s related-alert metadata record(s) for %s alert id(s).",
+            len(collected),
+            len(alert_ids),
+        )
+        return index_alert_records(collected)
+
+    def _vega_alerts_payload(self, incident: dict, window: dict) -> list[dict]:
+        """Related alerts for the incident vega_alerts property.
+
+        Checkbox off: getIncidents stubs (alertId, name, createdAt).
+        Checkbox on: full getAlerts records, stub when an id is missing.
+        """
+        stubs = incident_alert_stubs(incident)
+        if not self.fetch_related_alert_metadata:
+            payload: list[dict] = []
+            for stub in stubs:
+                summary = incident_alert_summary(stub)
+                if summary:
+                    payload.append(summary)
+            return payload
+        lookup_ids = self._metadata_lookup_ids(incident)
+        index = (
+            self._fetch_alert_metadata_index(lookup_ids, window)
+            if lookup_ids
+            else {}
+        )
+        payload: list[dict] = []
+        for stub in stubs:
+            full = None
+            for key in record_alert_ids(stub):
+                match = index.get(key)
+                if isinstance(match, dict):
+                    full = match
+                    break
+            if full is not None:
+                payload.append(dict(full))
+                continue
+            summary = incident_alert_summary(stub)
+            if summary:
+                payload.append(summary)
+        return payload
+
+    def _attach_vega_alerts(self, incident: dict, window: dict) -> dict:
+        incident = dict(incident)
+        incident["vega_alerts"] = self._vega_alerts_payload(incident, window)
+        return incident
 
     def _fetch_alerts_by_ids(self, alert_ids: list[str], window: dict) -> dict[str, dict]:
         """Resolve full alert records (including labels) for incident alertIds.
@@ -902,6 +1036,7 @@ class IngestionPipeline:
                 continue
             if not already_ingested:
                 incident = self._enrich_incident(incident)
+                incident = self._attach_vega_alerts(incident, window)
             self._cache_incident(incident)
             related = (
                 self._resolve_related_alerts(incident, related_index)
@@ -1046,6 +1181,7 @@ class IngestionPipeline:
             if not identifier:
                 continue
             display_id = record_display_id(incident, ENTITY_TYPE_INCIDENT)
+            incident = self._attach_vega_alerts(incident, window)
             packaged = set_soar_meta(
                 incident,
                 soar_alert_type=SOAR_ALERT_TYPE_INCIDENT,
@@ -1120,6 +1256,8 @@ class IngestionPipeline:
         """Count matching Vega records and return sample packages without ingest.
 
         Does not fetch timelines or alert events, and does not write a checkpoint.
+        When Fetch Related Alert Metadata is enabled, sample incidents include
+        full getAlerts rows in vega_alerts.
         Counts follow Vega Entities to Fetch and Has Related Incidents.
         """
         window = compute_time_window({}, self.backfill_days, self.lookback_minutes)

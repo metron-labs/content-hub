@@ -101,6 +101,7 @@ def _read_params(siemplify) -> dict:
         PARAM_API_ROOT,
         PARAM_BACKFILL,
         PARAM_ENTITIES,
+        PARAM_FETCH_RELATED_ALERT_METADATA,
         PARAM_HAS_RELATED,
         PARAM_INCIDENT_INVESTIGATION_STATUSES,
         PARAM_INCIDENT_SEVERITIES,
@@ -153,6 +154,9 @@ def _read_params(siemplify) -> dict:
             param_name=PARAM_PYTHON_TIMEOUT,
             default_value=PYTHON_PROCESS_TIMEOUT_DEFAULT,
         ),
+        "fetch_related_alert_metadata": siemplify.extract_connector_param(
+            param_name=PARAM_FETCH_RELATED_ALERT_METADATA, default_value="false"
+        ),
         "sync_close": siemplify.extract_connector_param(
             param_name=PARAM_SYNC, default_value="true"
         ),
@@ -184,6 +188,7 @@ def _validate_params(params: dict) -> None:
 def _build_manager_and_pipeline(siemplify, params):
     from ..core.constants import TEST_RUN_MAX_FETCH
     from ..core.IngestionPipeline import IngestionPipeline
+    from ..core.utils import truthy
     from ..core.VegaManager import VegaManager
 
     manager = VegaManager(
@@ -205,6 +210,9 @@ def _build_manager_and_pipeline(siemplify, params):
         incident_user_statuses=params["incident_user_statuses"],
         incident_investigation_statuses=params["incident_investigation_statuses"],
         incident_verdicts=params["incident_verdicts"],
+        fetch_related_alert_metadata=truthy(
+            params.get("fetch_related_alert_metadata")
+        ),
         max_fetch=TEST_RUN_MAX_FETCH if params.get("is_test_run") else None,
         logger_instance=siemplify.LOGGER,
     )

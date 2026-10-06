@@ -184,8 +184,8 @@ def case_display_name(record: dict, entity_type: str) -> str:
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} TEST 220"
-    return f"Vega {entity_type} - {name} TEST 220"
+        return f"Vega {entity_type} - {display_id} - {name} TEST 232"
+    return f"Vega {entity_type} - {name} TEST 232"
 
 
 def incident_case_title(record: dict, related_batch: int = 0) -> str:
@@ -401,6 +401,22 @@ def tags_from_events(events: list) -> list[str]:
     return collect_label_tags(
         *[{"labels": tags_from_event_fields(event)} for event in (events or [])]
     )
+
+
+def incident_alert_summary(stub: dict) -> dict:
+    """alertId, name, and createdAt from a getIncidents nested alert."""
+    stub = stub if isinstance(stub, dict) else {}
+    alert_id = str(stub.get("alertId") or stub.get("id") or "").strip()
+    if not alert_id:
+        return {}
+    summary = {"alertId": alert_id}
+    name = str(stub.get("name") or "").strip()
+    created_at = str(stub.get("createdAt") or "").strip()
+    if name:
+        summary["name"] = name
+    if created_at:
+        summary["createdAt"] = created_at
+    return summary
 
 
 def incident_alert_stubs(incident: dict) -> list[dict]:
@@ -656,7 +672,12 @@ def _details_payload(record: dict) -> str:
         return _safe_json(record)
     trimmed = {}
     for key, value in record.items():
-        if key in (SOAR_META_KEY, "alert_events", "nested_related_alerts"):
+        if key in (
+            SOAR_META_KEY,
+            "alert_events",
+            "nested_related_alerts",
+            "vega_alerts",
+        ):
             continue
         if key == "labels":
             trimmed[key] = _display_labels(value)
@@ -719,7 +740,8 @@ _INCIDENT_API_FIELDS = (
     ("assets", "assets"),
     ("observables", "observables"),
     ("alertsCount", "alerts_count"),
-    ("alerts", "alerts"),
+    # Do not map API `alerts` onto an event field named `alerts`. SecOps
+    # reserves that name for the case's alert list and drops it from Default.
     ("recommendedActions", "recommended_actions"),
     ("investigationPlan", "investigation_plan"),
     ("labels", "labels"),
@@ -754,6 +776,41 @@ def _apply_label_fields(
     ]
     if incident_label_names:
         event["vega_incident_label_names"] = ",".join(incident_label_names)
+
+
+def related_alert_rows(record: dict) -> list[dict]:
+    """Rows for the incident event: full vega_alerts, else getIncidents stubs."""
+    raw = record.get("vega_alerts") if isinstance(record, dict) else None
+    if isinstance(raw, list):
+        rows: list[dict] = []
+        for item in raw:
+            if isinstance(item, dict):
+                rows.append(item)
+            elif str(item or "").strip():
+                rows.append({"alertId": str(item).strip()})
+        return rows
+    rows = []
+    for stub in incident_alert_stubs(record):
+        summary = incident_alert_summary(stub)
+        if summary:
+            rows.append(summary)
+    return rows
+
+
+def related_alert_ids(rows: list[dict]) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        alert_id = str(
+            row.get("alertId") or row.get("id") or row.get("vegaAlertId") or ""
+        ).strip()
+        if not alert_id or alert_id in seen:
+            continue
+        seen.add(alert_id)
+        ids.append(alert_id)
+    return ids
 
 
 def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: int) -> dict:
@@ -801,6 +858,13 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
         "vega_entity_type": entity_type,
         "vega_soar_alert_type": soar_alert_type,
     }
+    if entity_type == ENTITY_TYPE_INCIDENT:
+        # Sit next to vega_entity_type so Default shows them without scrolling
+        # past the rest of the incident. Always present, including [].
+        rows = related_alert_rows(record)
+        alert_ids = related_alert_ids(rows)
+        event["vega_related_alert_ids"] = ",".join(alert_ids) if alert_ids else "[]"
+        event["vega_alerts"] = _soar_value(rows, limit=_MAX_DETAILS_CHARS)
     _set_mapped(event, "source_grouping_identifier", grouping_id)
     _set_mapped(event, "vega_incident_id", incident_id)
     if entity_type == ENTITY_TYPE_INCIDENT:
