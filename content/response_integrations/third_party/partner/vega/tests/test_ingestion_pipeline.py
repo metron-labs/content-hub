@@ -23,6 +23,7 @@ class FakeManager:
         self.alert_calls: list[dict] = []
         self.incident_calls: list[dict] = []
         self.event_calls: list[str] = []
+        self.event_batch_calls: list[list[str]] = []
         self.timeline_calls: list[str] = []
         self.last_fetch_truncated = False
 
@@ -73,6 +74,23 @@ class FakeManager:
     ):
         self.event_calls.append(alert_id)
         return list(self.alert_events.get(alert_id) or [])
+
+    def get_all_alerts_events(
+        self,
+        alert_ids,
+        page_size=None,
+        max_records=None,
+        deadline_monotonic=None,
+        **_kwargs,
+    ):
+        ids = [str(item) for item in (alert_ids or []) if str(item or "").strip()]
+        if len(ids) > 10:
+            raise AssertionError(f"alertIds batch of {len(ids)} exceeds 10")
+        self.event_batch_calls.append(ids)
+        self.event_calls.extend(ids)
+        return {
+            alert_id: list(self.alert_events.get(alert_id) or []) for alert_id in ids
+        }
 
     def get_all_incident_timeline(
         self, incident_id, page_size=None, deadline_monotonic=None, **_kwargs
@@ -839,14 +857,6 @@ def test_every_related_alert_fetches_events() -> None:
     ]
     manager.alerts = [{"id": f"alert-{i}", "name": f"A{i}"} for i in range(1, 6)]
     manager.alert_events = {f"alert-{i}": [{"name": f"e{i}"}] for i in range(1, 6)}
-    calls = {"n": 0}
-    original = manager.get_all_alert_events
-
-    def _counted(alert_id, **kwargs):
-        calls["n"] += 1
-        return original(alert_id, **kwargs)
-
-    manager.get_all_alert_events = _counted
     summary = _pipeline(
         manager,
         entities="Alerts,Incidents",
@@ -855,11 +865,47 @@ def test_every_related_alert_fetches_events() -> None:
     ).run()
     related = [item for item in summary["records"] if item[0] == ENTITY_TYPE_ALERT]
     assert len(related) == 5
-    assert calls["n"] == 5
-    with_events = [item for item in related if item[1].get("alert_events")]
-    assert len(with_events) == 5
+    assert manager.event_batch_calls == [[f"alert-{i}" for i in range(1, 6)]]
+    assert manager.event_calls == [f"alert-{i}" for i in range(1, 6)]
+    by_id = {item[1]["id"]: item[1]["alert_events"] for item in related}
+    for index in range(1, 6):
+        assert [evt["name"] for evt in by_id[f"alert-{index}"]] == [f"e{index}"]
     assert summary["incomplete"] is False
     assert summary["checkpoint"]["incomplete"] is False
+
+
+def _event_uuid(index: int) -> str:
+    return f"019e1b27-5119-7822-bde3-{index:012d}"
+
+
+def test_related_alert_events_are_batched_by_ten_and_not_mixed() -> None:
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "name": "Campaign",
+            "alerts": [{"alertId": _event_uuid(index)} for index in range(1, 13)],
+        }
+    ]
+    manager.alerts = [
+        {"id": _event_uuid(index), "name": f"A{index}"} for index in range(1, 13)
+    ]
+    manager.alert_events = {
+        _event_uuid(index): [{"name": f"e{index}"}] for index in range(1, 13)
+    }
+    summary = _pipeline(
+        manager,
+        entities="Alerts,Incidents",
+        has_related="Yes",
+        max_fetch=20,
+    ).run()
+    related = [item for item in summary["records"] if item[0] == ENTITY_TYPE_ALERT]
+    assert [len(batch) for batch in manager.event_batch_calls] == [10, 2]
+    assert all(len(batch) <= 10 for batch in manager.event_batch_calls)
+    by_id = {item[1]["id"]: item[1]["alert_events"] for item in related}
+    assert len(by_id) == 12
+    for index in range(1, 13):
+        assert [evt["name"] for evt in by_id[_event_uuid(index)]] == [f"e{index}"]
 
 
 def test_timeout_saves_watermark_and_next_run_continues() -> None:

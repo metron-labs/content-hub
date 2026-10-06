@@ -55,6 +55,8 @@ BACKFILL_MAX = 365
 GRAPHQL_PAGE_SIZE = 50
 ALERT_EVENTS_PAGE_SIZE = 100
 ALERT_EVENTS_MAX_FETCH = 2500
+# getAlertsEvents(alertIds) accepts at most this many ids per request.
+ALERT_EVENTS_ID_BATCH = 10
 # SOAR attaches at most this many child events per Vega alert. Ingest stops
 # paging getAlertsEvents here so it does not download 2500 rows to keep 200.
 MAX_EVENTS_PER_ALERT = 200
@@ -313,13 +315,19 @@ query GetIncidents(
 """.strip()
 
 GET_ALERT_EVENTS_QUERY = """
-query GetAlertsEvents($alertId: ID!, $limit: Int, $offset: Int) {
-  getAlertsEvents(alertId: $alertId, limit: $limit, offset: $offset) {
+query GetAlertsEvents($alertId: ID, $alertIds: [ID!], $limit: Int, $offset: Int) {
+  getAlertsEvents(alertId: $alertId, alertIds: $alertIds, limit: $limit, offset: $offset) {
     total
     limit
     offset
     results
     error { code message }
+    alerts {
+      alertId
+      total
+      results
+      error { code message }
+    }
   }
 }
 """.strip()

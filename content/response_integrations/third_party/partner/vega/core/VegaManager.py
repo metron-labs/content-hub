@@ -11,6 +11,7 @@ import time
 from typing import Any, Optional
 
 from .constants import (
+    ALERT_EVENTS_ID_BATCH,
     ALERT_EVENTS_PAGE_SIZE,
     DEFAULT_HTTP_TIMEOUT,
     GET_ALERT_EVENTS_QUERY,
@@ -137,6 +138,57 @@ def parse_alert_events_results(results: Any) -> list[dict]:
         if isinstance(item, dict):
             parsed.append(item)
     return parsed
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _graphql_alert_id(value: str) -> bool:
+    from .mapping import is_graphql_alert_id
+
+    return is_graphql_alert_id(value)
+
+
+def _same_alert_id(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if _graphql_alert_id(left) and _graphql_alert_id(right):
+        return left.casefold() == right.casefold()
+    return False
+
+
+def _event_owner_id(event: dict) -> str:
+    """Alert id stamped on a getAlertsEvents row, when the row has one."""
+    for key in ("alertId", "alert_id", "vegaAlertId"):
+        value = str(event.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def events_for_alert_bucket(results: Any, alert_id: str) -> tuple[list[dict], int]:
+    """Keep rows for `alert_id` and count rows that belong to some other alert.
+
+    Rows with no alert id stay in the parent `alerts[].alertId` bucket. Rows
+    tagged with a different alert id are dropped so events are not copied
+    onto the wrong alert.
+    """
+    alert_id = str(alert_id or "").strip()
+    kept: list[dict] = []
+    dropped = 0
+    for event in parse_alert_events_results(results):
+        owner = _event_owner_id(event)
+        if owner and not _same_alert_id(owner, alert_id):
+            dropped += 1
+            continue
+        kept.append(event)
+    return kept, dropped
 
 
 def _requests():
@@ -506,29 +558,205 @@ class VegaManager:
             deadline_monotonic=deadline_monotonic,
         )
 
+    def _dedupe_alert_ids(self, alert_ids: list) -> list[str]:
+        unique: list[str] = []
+        seen: set[str] = set()
+        for item in alert_ids or []:
+            alert_id = str(item or "").strip()
+            if not alert_id or alert_id in seen:
+                continue
+            seen.add(alert_id)
+            unique.append(alert_id)
+        return unique
+
+    def _buckets_from_alerts_events(
+        self, envelope: dict, requested: list[str]
+    ) -> dict[str, dict]:
+        """Map a getAlertsEvents payload onto the ids that were requested.
+
+        Per-alert `alerts[]` buckets are the source of truth. Top-level
+        `results` is used only for a single-id call that did not return
+        `alerts`, so a batch response cannot smear every row onto every alert.
+        """
+        buckets = {
+            alert_id: {"results": [], "total": None, "error": {}, "present": False}
+            for alert_id in requested
+        }
+        raw_alerts = envelope.get("alerts") if isinstance(envelope, dict) else None
+        if isinstance(raw_alerts, list) and raw_alerts:
+            seen_ids: set[str] = set()
+            for item in raw_alerts:
+                if not isinstance(item, dict):
+                    continue
+                raw_id = str(item.get("alertId") or "").strip()
+                alert_id = next(
+                    (
+                        candidate
+                        for candidate in requested
+                        if _same_alert_id(candidate, raw_id)
+                    ),
+                    "",
+                )
+                if not alert_id:
+                    self._log(
+                        "warning",
+                        "getAlertsEvents returned alertId=%s which was not in "
+                        "this batch; those events were not attached to another alert.",
+                        raw_id or "<missing>",
+                    )
+                    continue
+                if alert_id in seen_ids:
+                    self._log(
+                        "warning",
+                        "getAlertsEvents returned alertId=%s more than once; "
+                        "keeping the first bucket only.",
+                        alert_id,
+                    )
+                    continue
+                seen_ids.add(alert_id)
+                error = item.get("error") if isinstance(item.get("error"), dict) else {}
+                if error.get("code") or error.get("message"):
+                    buckets[alert_id] = {
+                        "results": [],
+                        "total": item.get("total"),
+                        "error": error,
+                        "present": True,
+                    }
+                    continue
+                raw_results = item.get("results")
+                parsed, dropped = events_for_alert_bucket(raw_results, alert_id)
+                if dropped:
+                    self._log(
+                        "warning",
+                        "Dropped %s getAlertsEvents row(s) for alert %s because "
+                        "they were tagged with a different alert id.",
+                        dropped,
+                        alert_id,
+                    )
+                if not parsed and raw_results not in (None, "", [], {}):
+                    self._log(
+                        "warning",
+                        "getAlertsEvents returned results that did not parse to "
+                        "events (alertId=%s, type=%s).",
+                        alert_id,
+                        type(raw_results).__name__,
+                    )
+                buckets[alert_id] = {
+                    "results": parsed,
+                    "returned": len(parsed) + dropped,
+                    "total": item.get("total"),
+                    "error": {},
+                    "present": True,
+                }
+            return buckets
+
+        if len(requested) == 1:
+            alert_id = requested[0]
+            error = {}
+            if isinstance(envelope, dict) and isinstance(envelope.get("error"), dict):
+                error = envelope.get("error") or {}
+            raw_results = envelope.get("results") if isinstance(envelope, dict) else None
+            parsed: list[dict] = []
+            returned = 0
+            if not (error.get("code") or error.get("message")):
+                parsed, dropped = events_for_alert_bucket(raw_results, alert_id)
+                returned = len(parsed) + dropped
+                if dropped:
+                    self._log(
+                        "warning",
+                        "Dropped %s getAlertsEvents row(s) for alert %s because "
+                        "they were tagged with a different alert id.",
+                        dropped,
+                        alert_id,
+                    )
+                if not parsed and raw_results not in (None, "", [], {}):
+                    self._log(
+                        "warning",
+                        "getAlertsEvents returned results that did not parse to "
+                        "events (alertId=%s, type=%s).",
+                        alert_id,
+                        type(raw_results).__name__,
+                    )
+            buckets[alert_id] = {
+                "results": parsed,
+                "returned": returned,
+                "total": envelope.get("total") if isinstance(envelope, dict) else None,
+                "error": error,
+                "present": True,
+            }
+            return buckets
+
+        top_error = {}
+        if isinstance(envelope, dict) and isinstance(envelope.get("error"), dict):
+            top_error = envelope.get("error") or {}
+        if top_error.get("code") or top_error.get("message"):
+            for alert_id in requested:
+                buckets[alert_id] = {
+                    "results": [],
+                    "total": None,
+                    "error": top_error,
+                    "present": True,
+                }
+            return buckets
+        self._log(
+            "warning",
+            "getAlertsEvents batch of %s alert id(s) did not include per-alert "
+            "results; no events were assigned.",
+            len(requested),
+        )
+        return buckets
+
+    def _fetch_alerts_events_page(
+        self, alert_ids: list[str], limit: int, offset: int
+    ) -> dict[str, dict]:
+        """One getAlertsEvents call. UUID ids go in alertIds (max 10)."""
+        ids = self._dedupe_alert_ids(alert_ids)[: max(1, int(ALERT_EVENTS_ID_BATCH))]
+        if not ids:
+            return {}
+        variables: dict[str, Any] = {
+            "limit": int(limit),
+            "offset": int(offset),
+        }
+        if all(_graphql_alert_id(alert_id) for alert_id in ids):
+            variables["alertIds"] = ids
+        elif len(ids) == 1:
+            variables["alertId"] = ids[0]
+        else:
+            raise VegaValidationException(
+                "getAlertsEvents alertIds accepts at most "
+                f"{ALERT_EVENTS_ID_BATCH} UUID alert ids."
+            )
+        data = self.graphql(GET_ALERT_EVENTS_QUERY, variables)
+        envelope = data.get("getAlertsEvents") or {}
+        if not isinstance(envelope, dict):
+            envelope = {}
+        return self._buckets_from_alerts_events(envelope, ids)
+
+    def _page_has_rate_limit(self, buckets: dict[str, dict], alert_ids: list[str]) -> bool:
+        for alert_id in alert_ids:
+            error = (buckets.get(alert_id) or {}).get("error") or {}
+            if not isinstance(error, dict):
+                continue
+            message = error.get("message") or error.get("code")
+            if is_rate_limit_message(message):
+                return True
+        return False
+
     def get_alert_events(
         self, alert_id: str, limit: int = ALERT_EVENTS_PAGE_SIZE, offset: int = 0
     ) -> dict:
-        data = self.graphql(
-            GET_ALERT_EVENTS_QUERY,
-            {"alertId": alert_id, "limit": limit, "offset": offset},
-        )
-        envelope = data.get("getAlertsEvents") or {}
-        if not isinstance(envelope, dict):
+        alert_id = str(alert_id or "").strip()
+        if not alert_id:
             return {}
-        envelope = dict(envelope)
-        raw_results = envelope.get("results")
-        parsed = parse_alert_events_results(raw_results)
-        if not parsed and raw_results not in (None, "", [], {}):
-            self._log(
-                "warning",
-                "getAlertsEvents returned results that did not parse to events "
-                "(alertId=%s, type=%s).",
-                alert_id,
-                type(raw_results).__name__,
-            )
-        envelope["results"] = parsed
-        return envelope
+        buckets = self._fetch_alerts_events_page([alert_id], limit, offset)
+        bucket = buckets.get(alert_id) or {}
+        return {
+            "total": bucket.get("total"),
+            "limit": limit,
+            "offset": offset,
+            "results": list(bucket.get("results") or []),
+            "error": bucket.get("error") or {},
+        }
 
     def _collect_paged(
         self,
@@ -596,6 +824,133 @@ class VegaManager:
                 break
         return collected[:max_records]
 
+    def get_all_alerts_events(
+        self,
+        alert_ids: list,
+        page_size: int = ALERT_EVENTS_PAGE_SIZE,
+        max_records: int = MAX_EVENTS_PER_ALERT,
+        deadline_monotonic: Optional[float] = None,
+    ) -> dict[str, list]:
+        """Page getAlertsEvents for many alerts.
+
+        UUID ids are sent in `alertIds` batches of at most 10. Each alert
+        receives only the `alerts[]` bucket for its own id. Non-UUID ids are
+        fetched one at a time with `alertId` so a human id cannot fail the batch.
+        """
+        from .mapping import normalize_alert_event
+
+        requested = self._dedupe_alert_ids(alert_ids)
+        collected: dict[str, list] = {alert_id: [] for alert_id in requested}
+        if not requested:
+            return {}
+        page_size = max(int(page_size or 1), 1)
+        try:
+            record_cap = max(int(max_records), 0)
+        except (TypeError, ValueError):
+            record_cap = MAX_EVENTS_PER_ALERT
+        if record_cap == 0:
+            return collected
+
+        batch_size = max(1, int(ALERT_EVENTS_ID_BATCH))
+        self.last_fetch_truncated = False
+        graphql_ids = [alert_id for alert_id in requested if _graphql_alert_id(alert_id)]
+        other_ids = [alert_id for alert_id in requested if alert_id not in graphql_ids]
+        groups = [
+            graphql_ids[index : index + batch_size]
+            for index in range(0, len(graphql_ids), batch_size)
+        ]
+        groups.extend([alert_id] for alert_id in other_ids)
+
+        for group in groups:
+            if not group:
+                continue
+            if self.last_fetch_truncated and self._deadline_passed(deadline_monotonic):
+                break
+            offsets = {alert_id: 0 for alert_id in group}
+            finished: set[str] = set()
+            while len(finished) < len(group):
+                active = [alert_id for alert_id in group if alert_id not in finished]
+                if any(collected[alert_id] for alert_id in active) and self._deadline_passed(
+                    deadline_monotonic
+                ):
+                    self.last_fetch_truncated = True
+                    break
+                offset = min(offsets[alert_id] for alert_id in active)
+                page_ids = [
+                    alert_id for alert_id in active if offsets[alert_id] == offset
+                ][:batch_size]
+                remaining = max(
+                    record_cap - len(collected[alert_id]) for alert_id in page_ids
+                )
+                if remaining <= 0:
+                    finished.update(page_ids)
+                    continue
+                request_size = min(page_size, remaining)
+                try:
+                    buckets = self._fetch_alerts_events_page(
+                        page_ids, request_size, offset
+                    )
+                except Exception:
+                    if any(collected[alert_id] for alert_id in page_ids):
+                        self.last_fetch_truncated = True
+                        self._log(
+                            "warning",
+                            "Stopped paging Vega alert events after a partial "
+                            "batch of %s alert(s).",
+                            len(page_ids),
+                        )
+                        finished.update(page_ids)
+                        continue
+                    raise
+                if self._page_has_rate_limit(buckets, page_ids):
+                    self._wait_rate_limit("GraphQL")
+                    continue
+                for alert_id in page_ids:
+                    bucket = buckets.get(alert_id) or {}
+                    error = bucket.get("error") if isinstance(bucket.get("error"), dict) else {}
+                    message = str(error.get("message") or error.get("code") or "")
+                    if message:
+                        if collected[alert_id]:
+                            self._log(
+                                "warning",
+                                "Stopped paging Vega alert events for %s after "
+                                "%s row(s): %s",
+                                alert_id,
+                                len(collected[alert_id]),
+                                message,
+                            )
+                        else:
+                            self._log(
+                                "warning",
+                                "getAlertsEvents failed for alert %s: %s",
+                                alert_id,
+                                message,
+                            )
+                        finished.add(alert_id)
+                        continue
+                    records = bucket.get("results") or []
+                    if not isinstance(records, list) or not records:
+                        finished.add(alert_id)
+                        continue
+                    returned = _optional_int(bucket.get("returned"))
+                    if returned is None:
+                        returned = len(records)
+                    room = record_cap - len(collected[alert_id])
+                    collected[alert_id].extend(records[:room])
+                    offsets[alert_id] += returned
+                    total = _optional_int(bucket.get("total"))
+                    if len(collected[alert_id]) >= record_cap:
+                        finished.add(alert_id)
+                    elif total is not None and offsets[alert_id] >= total:
+                        finished.add(alert_id)
+                    elif returned < request_size:
+                        finished.add(alert_id)
+
+        return {
+            alert_id: [normalize_alert_event(item) for item in collected[alert_id]]
+            for alert_id in requested
+        }
+
     def get_all_alert_events(
         self,
         alert_id: str,
@@ -603,17 +958,16 @@ class VegaManager:
         max_records: int = MAX_EVENTS_PER_ALERT,
         deadline_monotonic: Optional[float] = None,
     ) -> list:
-        from .mapping import normalize_alert_event
-
-        collected = self._collect_paged(
-            lambda limit, offset: self.get_alert_events(alert_id, limit, offset),
-            "results",
-            page_size,
-            max_records,
-            f"alert events for {alert_id}",
+        alert_id = str(alert_id or "").strip()
+        if not alert_id:
+            return []
+        fetched = self.get_all_alerts_events(
+            [alert_id],
+            page_size=page_size,
+            max_records=max_records,
             deadline_monotonic=deadline_monotonic,
         )
-        return [normalize_alert_event(item) for item in collected]
+        return list(fetched.get(alert_id) or [])
 
     def get_incident_timeline(
         self,

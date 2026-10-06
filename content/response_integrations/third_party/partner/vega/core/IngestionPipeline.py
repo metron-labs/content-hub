@@ -36,6 +36,7 @@ from datetime import datetime
 from typing import Optional
 
 from .constants import (
+    ALERT_EVENTS_ID_BATCH,
     ALERT_ID_LOOKUP_BATCH,
     ALERT_ID_LOOKUP_FROM,
     ENTITY_TYPE_ALERT,
@@ -255,6 +256,107 @@ class IngestionPipeline:
 
     def _sort_by_timestamp(self, rows: list[dict]) -> list[dict]:
         return sorted(rows, key=lambda row: record_timestamp(row) or "")
+
+    def _preferred_event_id(self, record: dict) -> str:
+        """UUID for getAlertsEvents(alertIds), otherwise the first candidate."""
+        candidates = record_alert_ids(record)
+        for candidate in candidates:
+            if is_graphql_alert_id(candidate):
+                return candidate
+        return candidates[0] if candidates else ""
+
+    def _lookup_prefetched_events(
+        self, events_by_id: dict[str, list], alert_id: str
+    ) -> Optional[list]:
+        if alert_id in events_by_id:
+            return list(events_by_id.get(alert_id) or [])
+        if not is_graphql_alert_id(alert_id):
+            return None
+        for key, value in events_by_id.items():
+            if is_graphql_alert_id(key) and key.casefold() == alert_id.casefold():
+                return list(value or [])
+        return None
+
+    def _apply_prefetched_events(self, record: dict, events_by_id: dict[str, list]) -> dict:
+        """Attach only the events fetched for this alert's own id."""
+        record = dict(record)
+        candidates = record_alert_ids(record)
+        events: list = []
+        used_id = candidates[0] if candidates else ""
+        for alert_id in candidates:
+            matched = self._lookup_prefetched_events(events_by_id, alert_id)
+            if matched is None:
+                continue
+            events = matched
+            used_id = alert_id
+            break
+        record["alert_events"] = events
+        self._log(
+            "info",
+            "Fetched %s event(s) for Vega alert %s (eventCount=%s).",
+            len(events),
+            used_id,
+            record.get("eventCount"),
+        )
+        return record
+
+    def _fetch_events_for_alerts(self, alerts: list[dict]) -> dict[str, list]:
+        """Load events for these alerts. UUID ids are batched (max 10 per call)."""
+        query_ids: list[str] = []
+        seen: set[str] = set()
+        for alert in alerts:
+            if not isinstance(alert, dict):
+                continue
+            alert_id = self._preferred_event_id(alert)
+            if not alert_id or alert_id in seen:
+                continue
+            seen.add(alert_id)
+            query_ids.append(alert_id)
+        if not query_ids:
+            return {}
+        batch_fetch = getattr(self.manager, "get_all_alerts_events", None)
+        if not callable(batch_fetch):
+            return self._fetch_events_one_by_one(alerts)
+        try:
+            fetched = batch_fetch(query_ids, deadline_monotonic=self._deadline) or {}
+            self._mark_if_truncated()
+        except Exception as exc:
+            self._log(
+                "warning",
+                "Unable to batch-fetch Vega alert events for %s alert(s): %s",
+                len(query_ids),
+                exc,
+            )
+            return self._fetch_events_one_by_one(alerts)
+        events_by_id: dict[str, list] = {}
+        if isinstance(fetched, dict):
+            for key, value in fetched.items():
+                alert_id = str(key or "").strip()
+                if alert_id:
+                    events_by_id[alert_id] = list(value or [])
+        return events_by_id
+
+    def _fetch_events_one_by_one(self, alerts: list[dict]) -> dict[str, list]:
+        events_by_id: dict[str, list] = {}
+        for alert in alerts:
+            if not isinstance(alert, dict):
+                continue
+            try:
+                enriched = self._enrich_alert(alert)
+            except Exception as exc:
+                identifier = record_id(alert, ENTITY_TYPE_ALERT)
+                self._log(
+                    "warning",
+                    "Unable to fetch events for Vega alert %s: %s",
+                    identifier,
+                    exc,
+                )
+                enriched = dict(alert)
+                enriched["alert_events"] = []
+            events = list(enriched.get("alert_events") or [])
+            for candidate in record_alert_ids(alert):
+                events_by_id[candidate] = events
+        return events_by_id
 
     def _enrich_alert(self, record: dict) -> dict:
         # Child Vega Alert Events live on the Vega Alert, not the incident.
@@ -545,6 +647,7 @@ class IngestionPipeline:
         related_batch: int,
         case_tags: Optional[list[str]] = None,
         apply_case_tags: bool = False,
+        events_by_id: Optional[dict[str, list]] = None,
     ) -> bool:
         if self._should_stop(len(records)):
             return False
@@ -552,7 +655,10 @@ class IngestionPipeline:
         if not identifier or identifier in ingested_set:
             return False
         try:
-            enriched = self._enrich_alert(alert)
+            if events_by_id is not None:
+                enriched = self._apply_prefetched_events(alert, events_by_id)
+            else:
+                enriched = self._enrich_alert(alert)
         except Exception as exc:
             self._log(
                 "warning",
@@ -607,23 +713,43 @@ class IngestionPipeline:
                 len(chunks),
                 self.max_alerts_per_case,
             )
+        batch_size = max(1, int(ALERT_EVENTS_ID_BATCH))
         for index, chunk in enumerate(chunks, start=1):
             if self._should_stop(len(records)):
                 break
             case_tags = collect_label_tags(incident, *chunk)
-            for offset, alert in enumerate(chunk):
-                if not self._append_related_alert(
-                    alert,
-                    incident,
-                    records,
-                    ingested,
-                    ingested_set,
-                    related_batch=index,
-                    case_tags=case_tags,
-                    apply_case_tags=offset == 0,
-                ):
-                    if self._should_stop(len(records)):
-                        return
+            offset = 0
+            while offset < len(chunk):
+                if self._should_stop(len(records)):
+                    return
+                window = chunk[offset : offset + batch_size]
+                pending = [
+                    alert
+                    for alert in window
+                    if record_id(alert, ENTITY_TYPE_ALERT)
+                    and record_id(alert, ENTITY_TYPE_ALERT) not in ingested_set
+                ]
+                remaining = self._remaining(len(records))
+                if remaining is not None:
+                    pending = pending[:remaining]
+                events_by_id = (
+                    self._fetch_events_for_alerts(pending) if pending else {}
+                )
+                for batch_index, alert in enumerate(window):
+                    if not self._append_related_alert(
+                        alert,
+                        incident,
+                        records,
+                        ingested,
+                        ingested_set,
+                        related_batch=index,
+                        case_tags=case_tags,
+                        apply_case_tags=(offset + batch_index) == 0,
+                        events_by_id=events_by_id,
+                    ):
+                        if self._should_stop(len(records)):
+                            return
+                offset += batch_size
 
     def _incident_time_window(self, incident: dict) -> tuple[str, str]:
         """Shared createdAt / lastUpdated used so a batch stays one SOAR case."""
@@ -797,14 +923,19 @@ class IngestionPipeline:
         records: list[tuple[str, dict]],
         ingested: list[str],
         ingested_set: set[str],
+        events_by_id: Optional[dict[str, list]] = None,
     ) -> bool:
         if self._should_stop(len(records)):
             return False
         identifier = record_id(alert, ENTITY_TYPE_ALERT)
         if not identifier or identifier in ingested_set:
             return False
+        if events_by_id is not None:
+            enriched = self._apply_prefetched_events(alert, events_by_id)
+        else:
+            enriched = self._enrich_alert(alert)
         packaged = set_soar_meta(
-            self._enrich_alert(alert),
+            enriched,
             soar_alert_type=SOAR_ALERT_TYPE_ALERT,
             grouping_id=alert_grouping_id(identifier),
             case_tags=collect_label_tags(alert),
@@ -845,10 +976,37 @@ class IngestionPipeline:
             [item for item in alerts if isinstance(item, dict)]
         )
         self._log("info", "Fetched %s %s Vega alert(s).", len(alerts), label)
-        for alert in alerts:
-            if not self._append_standalone_alert(alert, records, ingested, ingested_set):
-                if self._should_stop(len(records)):
-                    break
+        batch_size = max(1, int(ALERT_EVENTS_ID_BATCH))
+        index = 0
+        while index < len(alerts):
+            if self._should_stop(len(records)):
+                break
+            window = alerts[index : index + batch_size]
+            pending = [
+                alert
+                for alert in window
+                if record_id(alert, ENTITY_TYPE_ALERT)
+                and record_id(alert, ENTITY_TYPE_ALERT) not in ingested_set
+            ]
+            remaining = self._remaining(len(records))
+            if remaining is not None:
+                pending = pending[:remaining]
+            events_by_id = self._fetch_events_for_alerts(pending) if pending else {}
+            stop = False
+            for alert in window:
+                if not self._append_standalone_alert(
+                    alert,
+                    records,
+                    ingested,
+                    ingested_set,
+                    events_by_id=events_by_id,
+                ):
+                    if self._should_stop(len(records)):
+                        stop = True
+                        break
+            if stop:
+                break
+            index += batch_size
 
     def _ingest_plan(self) -> dict:
         """Map Vega Entities + Has Related Incidents to fetch/package behavior."""
