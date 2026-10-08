@@ -9,7 +9,7 @@ parameters:
     is_advanced: false
     mode: script
 -   name: Access Key
-    default_value: ''
+    default_value: 'K3IAHOOx2eRNO6JZU7h4oCjwNSfxKlSe0OwYrgFa5romBhPEeMtVssRwrpPPk3jkLCfN3ah'
     type: password
     description: Vega Access Key used with login_machine. Invalid values cause a configuration
         error.
@@ -17,7 +17,7 @@ parameters:
     is_advanced: false
     mode: script
 -   name: Access Key ID
-    default_value: ''
+    default_value: 'K3IAHOOx2eRNO6JZU7h4oCjwNSfx'
     type: password
     description: Vega Access Key ID (X-Vega-Key-Id header). Invalid values cause a
         configuration error.
@@ -29,9 +29,11 @@ parameters:
     type: string
     description: 'Possible Values: Alerts, Incidents (singular Alert or Incident is
         also accepted). Combined with Has Related Incidents: Incidents+Alerts creates
-        one SOAR case for the Vega incident and separate batched cases for related
-        Vega alerts when Yes is selected. Unrelated alerts are one SOAR case each
-        when No is selected. Incidents only creates Vega Incident cases. Alerts only
+        one SOAR case for the Vega incident and groups related Vega alerts by one
+        source grouping identifier when Yes is selected. SecOps fills that case
+        up to Max. alerts grouped into a case, then starts another. Unrelated
+        alerts are one SOAR case each when No is selected. Incidents only creates
+        Vega Incident cases. Alerts only
         creates one case per Vega alert. At least one is required. Unsupported values
         cause a configuration error.'
     is_mandatory: true
@@ -47,7 +49,7 @@ parameters:
     is_advanced: false
     mode: script
 -   name: Backfill Days
-    default_value: '30'
+    default_value: '365'
     type: string
     description: Days to backfill on the first run only. Enter an integer from 0 to
         365 (0 starts from today). Invalid values cause a configuration error.
@@ -82,8 +84,8 @@ parameters:
     default_value: Yes,No
     type: string
     description: 'Possible Values: Yes, No. Applies when Alerts are selected. Yes
-        loads related Vega alerts as their own batched SOAR cases (not on the incident
-        case) when Incidents is also selected, or as one case per alert when only
+        loads related Vega alerts onto one source grouping identifier (not on the
+        incident case) when Incidents is also selected, or as one case per alert when only
         Alerts is selected. No loads unrelated Vega alerts as one SOAR case each
         and does not fetch related alerts. Select both to run both flows. At least
         one is required. Unsupported values cause a configuration error.'
@@ -143,8 +145,8 @@ parameters:
         actually closed in SecOps are synced. Creating or updating a case during
         ingest does not resolve Vega. The first run after enable only sets a
         baseline and does not send historical closes. An incident-only case
-        resolves that Vega incident. A related-alert batch or unrelated alert
-        case resolves those Vega alerts. Closing related-alert batches does not
+        resolves that Vega incident. A related-alert case or unrelated alert
+        case resolves those Vega alerts. Closing the related-alert case does not
         resolve the Vega incident.
     is_mandatory: false
     is_advanced: true

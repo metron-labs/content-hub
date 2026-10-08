@@ -12,10 +12,10 @@ Connector flow
    packaged. Each emitted record becomes one SOAR alert inside a case:
 
    Incidents + Alerts
-     Yes,No: incident-only case, related alerts in separate batch cases,
+     Yes,No: incident-only case, related alerts sharing one grouping id,
              unrelated alerts as their own cases.
-     Yes:    incident-only case plus related-alert batch cases; skip
-             unrelated alerts.
+     Yes:    incident-only case plus related alerts on that grouping id;
+             skip unrelated alerts.
      No:     incident-only case; unrelated alerts as their own cases.
 
    Incidents only (Yes, No, or Yes,No): incident-only cases. Do not fetch
@@ -48,8 +48,10 @@ from .constants import (
     ALERT_METADATA_ID_BATCH,
     ENTITY_TYPE_ALERT,
     ENTITY_TYPE_INCIDENT,
+    GRAPHQL_PAGE_SIZE,
     INGESTED_ID_CAP,
     MAX_ALERTS_PER_CASE,
+    RELATED_BATCH_VERSION,
     SOAR_ALERT_TYPE_ALERT,
     SOAR_ALERT_TYPE_INCIDENT,
     TEST_RUN_MAX_FETCH,
@@ -57,7 +59,6 @@ from .constants import (
 from .mapping import (
     alert_grouping_id,
     case_display_name,
-    chunk_case_alerts,
     collect_label_tags,
     incident_alert_ids,
     incident_alert_stubs,
@@ -73,7 +74,7 @@ from .mapping import (
     record_label_tags,
     record_name,
     record_timestamp,
-    related_incident_ref,
+    related_incident_ids,
     set_soar_meta,
 )
 from .utils import (
@@ -114,13 +115,11 @@ class IngestionPipeline:
         incident_verdicts: str = "",
         fetch_related_alert_metadata: bool = False,
         max_fetch: Optional[int] = None,
-        max_alerts_per_case: int = MAX_ALERTS_PER_CASE,
         logger_instance=None,
     ) -> None:
         self.manager = manager
         self.entities = resolve_entities(entities_raw)
         self.max_fetch = max_fetch
-        self.max_alerts_per_case = max(1, int(max_alerts_per_case))
         self.lookback_minutes = parse_lookback_minutes(lookback_minutes)
         self.backfill_days = parse_backfill_days(backfill_days)
         self.alert_filters = resolve_alert_filters(
@@ -145,6 +144,13 @@ class IngestionPipeline:
         self._incomplete = False
         self._progress_ts: Optional[datetime] = None
         self._deadline: Optional[float] = None
+        self._open_related: dict[str, dict] = {}
+        self._settled_related: dict[str, int] = {}
+        self._open_ids_at_start: set[str] = set()
+        self._upgrade_incident_ids: list[str] = []
+        self._replay_related = False
+        self._related_scan_offset = 0
+        self._related_scan_incomplete = False
 
     def _log(self, level: str, msg: str, *args) -> None:
         safe_log(self.logger, level, msg, *args)
@@ -292,22 +298,13 @@ class IngestionPipeline:
         record = dict(record)
         candidates = record_alert_ids(record)
         events: list = []
-        used_id = candidates[0] if candidates else ""
         for alert_id in candidates:
             matched = self._lookup_prefetched_events(events_by_id, alert_id)
             if matched is None:
                 continue
             events = matched
-            used_id = alert_id
             break
         record["alert_events"] = events
-        self._log(
-            "info",
-            "Fetched %s event(s) for Vega alert %s (eventCount=%s).",
-            len(events),
-            used_id,
-            record.get("eventCount"),
-        )
         return record
 
     def _fetch_events_for_alerts(self, alerts: list[dict]) -> dict[str, list]:
@@ -376,7 +373,6 @@ class IngestionPipeline:
             record.setdefault("alert_events", [])
             return record
         events: list = []
-        used_id = candidates[0]
         for alert_id in candidates:
             try:
                 events = self.manager.get_all_alert_events(
@@ -391,16 +387,8 @@ class IngestionPipeline:
                     exc,
                 )
                 continue
-            used_id = alert_id
             break
         record["alert_events"] = events
-        self._log(
-            "info",
-            "Fetched %s event(s) for Vega alert %s (eventCount=%s).",
-            len(events),
-            used_id,
-            record.get("eventCount"),
-        )
         return record
 
     def _remaining(self, collected: int) -> Optional[int]:
@@ -485,7 +473,10 @@ class IngestionPipeline:
                         lookup_window, None, vega_alert_ids=batch
                     )
                 page = self.manager.get_alerts(
-                    variables, len(batch), deadline_monotonic=self._deadline
+                    variables,
+                    len(batch),
+                    deadline_monotonic=self._deadline,
+                    page_size=len(batch),
                 )
                 self._mark_if_truncated()
             except Exception as exc:
@@ -599,7 +590,10 @@ class IngestionPipeline:
                         lookup_window, None, vega_alert_ids=batch
                     )
                 page = self.manager.get_alerts(
-                    variables, len(batch), deadline_monotonic=self._deadline
+                    variables,
+                    len(batch),
+                    deadline_monotonic=self._deadline,
+                    page_size=len(batch),
                 )
                 self._mark_if_truncated()
             except Exception as exc:
@@ -608,12 +602,35 @@ class IngestionPipeline:
             return [item for item in page if isinstance(item, dict)]
 
         def _lookup_batches(ids: list[str], *, use_alert_ids: bool) -> None:
-            for index in range(0, len(ids), batch_size):
+            total_batches = (len(ids) + batch_size - 1) // batch_size if ids else 0
+            key_name = "alertIds" if use_alert_ids else "vegaAlertIds"
+            for batch_number, index in enumerate(range(0, len(ids), batch_size), start=1):
                 if self._deadline_reached():
                     self._incomplete = True
+                    self._log(
+                        "info",
+                        "Step 4 — stopped before getAlerts batch %s of %s "
+                        "(%s). The connector time limit was reached, so %s "
+                        "id(s) were not requested this run.",
+                        batch_number,
+                        total_batches,
+                        key_name,
+                        len(ids) - index,
+                    )
                     return
-                collected.extend(
-                    _lookup(ids[index : index + batch_size], use_alert_ids=use_alert_ids)
+                batch = ids[index : index + batch_size]
+                returned = _lookup(batch, use_alert_ids=use_alert_ids)
+                collected.extend(returned)
+                self._log(
+                    "info",
+                    "Step 4 — getAlerts batch %s of %s (%s): sent %s id(s) "
+                    "with limit %s, received %s alert record(s).",
+                    batch_number,
+                    total_batches,
+                    key_name,
+                    len(batch),
+                    len(batch),
+                    len(returned),
                 )
 
         def _found_ids() -> set[str]:
@@ -622,10 +639,22 @@ class IngestionPipeline:
                 found.update(record_alert_ids(alert))
             return found
 
+        def _retry_missing(ids: list[str], *, use_alert_ids: bool) -> None:
+            """A batched getAlerts call can omit ids. Call each missing id."""
+            found = _found_ids()
+            missing = [item for item in ids if item not in found]
+            for alert_id in missing:
+                if self._deadline_reached():
+                    self._incomplete = True
+                    return
+                collected.extend(_lookup([alert_id], use_alert_ids=use_alert_ids))
+
         _lookup_batches(graphql_ids, use_alert_ids=True)
+        _retry_missing(graphql_ids, use_alert_ids=True)
         pending_vega = [item for item in vega_ids if item not in _found_ids()]
         if pending_vega:
             _lookup_batches(pending_vega, use_alert_ids=False)
+            _retry_missing(pending_vega, use_alert_ids=False)
 
         if not collected:
             self._log(
@@ -652,12 +681,27 @@ class IngestionPipeline:
                     exc,
                 )
                 collected = []
+        found = _found_ids()
+        missing = [item for item in unique if item not in found]
         self._log(
             "info",
-            "Fetched %s Vega alert(s) by id from %s incident alert id(s).",
-            len(collected),
+            "Step 4 — getAlerts finished: requested %s id(s), received %s "
+            "alert record(s), matched %s of those ids, %s id(s) still missing.",
             len(unique),
+            len(collected),
+            len(unique) - len(missing),
+            len(missing),
         )
+        if missing:
+            sample = ", ".join(missing[:10])
+            extra = "" if len(missing) <= 10 else f" and {len(missing) - 10} more"
+            self._log(
+                "warning",
+                "Step 4 — getAlerts did not return these ids: %s%s. "
+                "They are still packaged from the nested incident stub.",
+                sample,
+                extra,
+            )
         return index_alert_records(collected)
 
     def _pool_limit(self) -> Optional[int]:
@@ -679,34 +723,59 @@ class IngestionPipeline:
             seen.add(identifier)
             resolved.append(alert)
 
+        full_matches = 0
+        stub_only = 0
         for stub in incident_alert_stubs(incident):
             full = None
             for key in record_alert_ids(stub):
                 full = related_index.get(key)
                 if full:
                     break
+            if full:
+                full_matches += 1
+            else:
+                stub_only += 1
             _add(merge_related_alert(stub, full))
+        from_stubs = len(resolved)
 
+        wanted = {incident_id, display_id}
+        wanted.discard("")
         for alert in related_index.values():
-            ref_id, _ = related_incident_ref(alert)
-            if ref_id and ref_id in {incident_id, display_id}:
+            if wanted.intersection(related_incident_ids(alert)):
                 _add(alert)
+        label = (
+            f"{display_id} ({incident_id})"
+            if display_id and display_id != incident_id
+            else (incident_id or display_id)
+        )
+        self._log(
+            "info",
+            "Step 5 — %s: nested stubs=%s, full getAlerts records=%s, "
+            "stub only=%s, extra alerts matched by incident id=%s, "
+            "total that will be packaged=%s.",
+            label,
+            full_matches + stub_only,
+            full_matches,
+            stub_only,
+            len(resolved) - from_stubs,
+            len(resolved),
+        )
         return resolved
 
     def _apply_incident_context(
         self,
         alert: dict,
         incident: dict,
-        related_batch: int,
         case_tags: Optional[list[str]] = None,
+        batch: int = 1,
     ) -> dict:
         incident_id = record_id(incident, ENTITY_TYPE_INCIDENT)
         display_id = record_display_id(incident, ENTITY_TYPE_INCIDENT)
         alert = dict(alert)
         # Related alerts keep their own Vega labels. Empty stays empty on the
         # event (`[]`); never copy incident labels onto a related alert's
-        # `labels` field. Incident names still go on case_tags (every batch)
-        # and incident_label_tags so related-alert cases can tag from events.
+        # `labels` field. Incident names still go on case_tags and
+        # incident_label_tags so the related-alert case can tag from events.
         if incident.get("timeline") and not alert.get("timeline"):
             alert["timeline"] = incident.get("timeline")
         description = str(alert.get("description") or "").strip()
@@ -722,10 +791,10 @@ class IngestionPipeline:
         return set_soar_meta(
             alert,
             soar_alert_type=SOAR_ALERT_TYPE_ALERT,
-            grouping_id=incident_grouping_id(incident_id, related_batch),
+            grouping_id=incident_grouping_id(incident_id, related=True),
             case_tags=list(case_tags or []),
             incident_label_tags=record_label_tags(incident),
-            case_title=incident_case_title(incident, related_batch),
+            case_title=incident_case_title(incident, batch=batch),
             grouping_time=grouping_start or record_timestamp(incident),
             grouping_start=grouping_start,
             grouping_end=grouping_end,
@@ -734,7 +803,7 @@ class IngestionPipeline:
             incident_name=record_name(incident),
             is_incident_case=True,
             is_related_batch=True,
-            case_part=related_batch,
+            case_part=batch,
         )
 
     def _append_incident_alert(
@@ -778,10 +847,10 @@ class IngestionPipeline:
         records: list[tuple[str, dict]],
         ingested: list[str],
         ingested_set: set[str],
-        related_batch: int,
         case_tags: Optional[list[str]] = None,
         apply_case_tags: bool = False,
         events_by_id: Optional[dict[str, list]] = None,
+        batch: int = 1,
     ) -> bool:
         if self._should_stop(len(records)):
             return False
@@ -803,7 +872,7 @@ class IngestionPipeline:
             enriched = dict(alert)
             enriched.setdefault("alert_events", [])
         packaged = self._apply_incident_context(
-            enriched, incident, related_batch, case_tags=case_tags
+            enriched, incident, case_tags=case_tags, batch=batch
         )
         if apply_case_tags:
             packaged = set_soar_meta(packaged, apply_case_tags=True)
@@ -811,6 +880,28 @@ class IngestionPipeline:
         self._mark_ingested(ingested, ingested_set, identifier)
         self._note_progress(packaged)
         return True
+
+    def _ordered_stubs(self, incident: dict) -> list[dict]:
+        return self._sort_by_timestamp(incident_alert_stubs(incident))
+
+    def _pending_stubs(self, incident: dict, ingested_set: set[str]) -> list[dict]:
+        pending: list[dict] = []
+        for stub in self._ordered_stubs(incident):
+            keys = record_alert_ids(stub)
+            if not keys or any(key in ingested_set for key in keys):
+                continue
+            pending.append(stub)
+        return pending
+
+    def _stub_lookup_ids(self, stubs: list[dict]) -> list[str]:
+        ids: list[str] = []
+        seen: set[str] = set()
+        for stub in stubs:
+            for key in record_alert_ids(stub):
+                if key not in seen:
+                    seen.add(key)
+                    ids.append(key)
+        return ids
 
     def _emit_incident_cases(
         self,
@@ -820,12 +911,19 @@ class IngestionPipeline:
         ingested: list[str],
         ingested_set: set[str],
     ) -> None:
-        """Incident-only case, then related alerts in batches of up to 90.
+        """Incident case, then every related alert.
 
-        The Vega incident is never grouped with related alerts so closing the
-        incident case can resolve the incident without touching those alerts.
+        Every related alert shares ``Vega:incident:<id>:related``. Titles
+        still use ``(batch N)`` in chunks of 90. SecOps groups by the shared
+        identifier and splits at max alerts per case.
         """
         identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
+        display_id = record_display_id(incident, ENTITY_TYPE_INCIDENT)
+        label = (
+            f"{display_id} ({identifier})"
+            if display_id and display_id != identifier
+            else (identifier or display_id)
+        )
         self._append_incident_alert(
             incident,
             records,
@@ -833,60 +931,137 @@ class IngestionPipeline:
             ingested_set,
             case_tags=collect_label_tags(incident),
         )
-        chunks = chunk_case_alerts(
-            self._sort_by_timestamp(list(related or [])),
-            self.max_alerts_per_case,
-        )
-        if chunks:
+        if not related:
+            return
+        ordered = self._ordered_stubs(incident)
+        case_size = max(1, int(MAX_ALERTS_PER_CASE))
+        batch_by_key: dict[str, int] = {}
+        for index, stub in enumerate(ordered):
+            batch_no = index // case_size + 1
+            for key in record_alert_ids(stub):
+                batch_by_key[key] = batch_no
+        resolved_index: dict[str, dict] = {}
+        for alert in related or []:
+            if not isinstance(alert, dict):
+                continue
+            for key in record_alert_ids(alert):
+                resolved_index.setdefault(key, alert)
+        queue: list[tuple[dict, int]] = []
+        for stub in self._pending_stubs(incident, ingested_set):
+            keys = record_alert_ids(stub)
+            full = None
+            for key in keys:
+                full = resolved_index.get(key)
+                if full:
+                    break
+            batch_no = batch_by_key.get(keys[0], 1) if keys else 1
+            queue.append((full or stub, batch_no))
+        known = set(batch_by_key)
+        extra_index = len(ordered)
+        for alert in related or []:
+            keys = record_alert_ids(alert)
+            if not keys or any(key in known or key in ingested_set for key in keys):
+                continue
+            batch_no = extra_index // case_size + 1
+            extra_index += 1
+            known.update(keys)
+            queue.append((alert, batch_no))
+        if not ordered and not queue:
             self._log(
                 "info",
-                "Vega incident %s has %s related alert(s); incident-only case "
-                "plus %s related-alert case(s) (max %s alerts per case).",
-                identifier,
-                len(related),
-                len(chunks),
-                self.max_alerts_per_case,
+                "Vega incident %s: no related alert ids were loaded, so no "
+                "related-alert cases will be created.",
+                label,
             )
-        batch_size = max(1, int(ALERT_EVENTS_ID_BATCH))
-        for index, chunk in enumerate(chunks, start=1):
+            return
+        already_sent = max(len(ordered) - len(self._pending_stubs(incident, ingested_set)), 0)
+        to_package = len(queue)
+        first_batch = queue[0][1] if queue else 0
+        last_batch = queue[-1][1] if queue else 0
+        self._log(
+            "info",
+            "Step 6 — %s: %s related alert(s) in batches of %s. "
+            "%s already checkpointed. This run adds all %s "
+            "(batch %s through batch %s). They share one source grouping "
+            "identifier. SecOps splits that group at max alerts per case.",
+            label,
+            len(ordered) or to_package,
+            case_size,
+            already_sent,
+            to_package,
+            first_batch,
+            last_batch,
+        )
+        if not queue:
+            return
+        case_tags = collect_label_tags(incident, *[alert for alert, _batch in queue])
+        event_batch = max(1, int(ALERT_EVENTS_ID_BATCH))
+        offset = 0
+        stopped_early = False
+        packaged = 0
+        while offset < len(queue):
             if self._should_stop(len(records)):
+                stopped_early = True
                 break
-            case_tags = collect_label_tags(incident, *chunk)
-            offset = 0
-            while offset < len(chunk):
-                if self._should_stop(len(records)):
-                    return
-                window = chunk[offset : offset + batch_size]
-                pending = [
-                    alert
-                    for alert in window
-                    if record_id(alert, ENTITY_TYPE_ALERT)
-                    and record_id(alert, ENTITY_TYPE_ALERT) not in ingested_set
-                ]
-                remaining = self._remaining(len(records))
-                if remaining is not None:
-                    pending = pending[:remaining]
-                events_by_id = (
-                    self._fetch_events_for_alerts(pending) if pending else {}
-                )
-                for batch_index, alert in enumerate(window):
-                    if not self._append_related_alert(
-                        alert,
-                        incident,
-                        records,
-                        ingested,
-                        ingested_set,
-                        related_batch=index,
-                        case_tags=case_tags,
-                        apply_case_tags=(offset + batch_index) == 0,
-                        events_by_id=events_by_id,
-                    ):
-                        if self._should_stop(len(records)):
-                            return
-                offset += batch_size
+            window = queue[offset : offset + event_batch]
+            pending = [alert for alert, _batch in window]
+            remaining = self._remaining(len(records))
+            if remaining is not None:
+                pending = pending[:remaining]
+            events_by_id = self._fetch_events_for_alerts(pending) if pending else {}
+            halt = False
+            for batch_index, (alert, batch_no) in enumerate(window):
+                if self._append_related_alert(
+                    alert,
+                    incident,
+                    records,
+                    ingested,
+                    ingested_set,
+                    case_tags=case_tags,
+                    apply_case_tags=(offset + batch_index) == 0,
+                    events_by_id=events_by_id,
+                    batch=batch_no,
+                ):
+                    packaged += 1
+                elif self._should_stop(len(records)):
+                    stopped_early = True
+                    halt = True
+                    break
+            if halt:
+                break
+            offset += event_batch
+        still_waiting = max(to_package - packaged, 0)
+        if still_waiting and stopped_early:
+            self._log(
+                "info",
+                "Step 6 — %s: added %s related alert(s) to this package. "
+                "%s are still waiting because the connector time limit was "
+                "reached. The next run will fetch and package those.",
+                label,
+                packaged,
+                still_waiting,
+            )
+        elif still_waiting:
+            self._log(
+                "warning",
+                "Step 6 — %s: added %s related alert(s) to this package. "
+                "%s were not packaged.",
+                label,
+                packaged,
+                still_waiting,
+            )
+        else:
+            self._log(
+                "info",
+                "Step 6 — %s: added %s related alert(s) to this package. "
+                "None are left waiting in the connector. SecOps has not "
+                "created the cases yet.",
+                label,
+                packaged,
+            )
 
     def _incident_time_window(self, incident: dict) -> tuple[str, str]:
-        """Shared createdAt / lastUpdated used so a batch stays one SOAR case."""
+        """Shared createdAt / lastUpdated so related alerts stay one group."""
         start = str((incident or {}).get("createdAt") or "").strip()
         end = str(
             (incident or {}).get("lastUpdated")
@@ -894,6 +1069,30 @@ class IngestionPipeline:
             or start
         ).strip()
         return start, end
+
+    def _incident_log_label(self, incident: dict) -> str:
+        identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
+        display_id = record_display_id(incident, ENTITY_TYPE_INCIDENT)
+        if display_id and display_id != identifier:
+            return f"{display_id} ({identifier})"
+        return identifier or display_id or "(unknown incident)"
+
+    def _log_nested_counts(self, incidents: list[dict], step: str, note: str) -> None:
+        self._log("info", "%s: %s incident(s). %s", step, len(incidents), note)
+        for incident in incidents:
+            nested = len(incident_alert_ids(incident))
+            expected = self._incident_alerts_count(incident)
+            gap = max(expected - nested, 0)
+            self._log(
+                "info",
+                "%s — %s: alertsCount=%s, nested alert ids in hand=%s, "
+                "ids still missing from the nested field=%s.",
+                step,
+                self._incident_log_label(incident),
+                expected,
+                nested,
+                gap,
+            )
 
     def _incident_alerts_count(self, incident: dict) -> int:
         try:
@@ -905,66 +1104,198 @@ class IngestionPipeline:
         expected = self._incident_alerts_count(incident)
         return expected > len(incident_alert_ids(incident))
 
+    def _expand_nested_alert_ids(self, incidents: list[dict]) -> list[dict]:
+        """Replace a short nested alerts page with the by-id getIncidents list.
+
+        The incident list returns alertsCount in full and only a page of nested
+        alert ids. getIncidents(incidentIds) for that one incident returns every id.
+        """
+        expanded: list[dict] = []
+        for incident in incidents:
+            if not isinstance(incident, dict):
+                continue
+            if not self._nested_alerts_are_short(incident):
+                expanded.append(incident)
+                continue
+            identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
+            if not identifier:
+                expanded.append(incident)
+                continue
+            # A prior run can mark this alertsCount settled after seeing only
+            # the short list page. Drop that so the by-id ids are read again.
+            self._settled_related.pop(identifier, None)
+            current = len(incident_alert_ids(incident))
+            try:
+                full = self.manager.get_incident(identifier)
+            except Exception as exc:
+                self._log(
+                    "warning",
+                    "Unable to load full alert ids for Vega incident %s: %s",
+                    identifier,
+                    exc,
+                )
+                expanded.append(incident)
+                continue
+            if not isinstance(full, dict):
+                expanded.append(incident)
+                continue
+            full_ids = incident_alert_ids(full)
+            if len(full_ids) <= current:
+                expanded.append(incident)
+                continue
+            merged = dict(incident)
+            merged["alerts"] = full.get("alerts")
+            if full.get("alertsCount") is not None:
+                merged["alertsCount"] = full.get("alertsCount")
+            self._log(
+                "info",
+                "Vega incident %s alert ids expanded from %s to %s "
+                "via getIncidents(incidentIds).",
+                identifier,
+                current,
+                len(full_ids),
+            )
+            expanded.append(merged)
+        return expanded
+
+    def _needs_related_scan(self, incident: dict) -> bool:
+        """True until a full related-alert scan has run for this alertsCount."""
+        identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
+        if not identifier:
+            return False
+        if identifier in self._open_related:
+            return True
+        expected = self._incident_alerts_count(incident)
+        settled_at = self._settled_related.get(identifier)
+        if settled_at is not None and expected <= settled_at:
+            return False
+        return self._nested_alerts_are_short(incident)
+
+    def _remember_open_incident(self, incident: dict, have: int) -> None:
+        identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
+        if not identifier:
+            return
+        self._open_related[identifier] = {
+            "expected": self._incident_alerts_count(incident),
+            "display_id": record_display_id(incident, ENTITY_TYPE_INCIDENT),
+            "have": max(int(have or 0), 0),
+        }
+
+    def _backfill_variables(self, window: dict) -> dict:
+        """Related-alert scan with no severity, status, or verdict filter.
+
+        getAlerts has no incident-id argument. Pages are limited to alerts that
+        have a related incident, then matched to the open incidents here.
+        """
+        lookup = self._id_lookup_window(window)
+        return _drop_none(
+            {
+                "hasRelatedIncidents": True,
+                "from": lookup.get("from"),
+                "to": lookup.get("to"),
+                "updatedFrom": lookup.get("updated_from"),
+                "updatedTo": lookup.get("updated_to"),
+            }
+        )
+
     def _backfill_related_index(
         self,
         incidents: list[dict],
         related_index: dict[str, dict],
         window: dict,
     ) -> dict[str, dict]:
-        """Load related alerts missing from getIncidents `alerts`.
+        """Page related alerts until each short incident reaches alertsCount.
 
-        Vega can return alertsCount 806 while the nested alerts list is only a
-        page of that set. Those missing alerts never become SOAR cases.
+        A timeout saves the scan offset. The next run continues from there
+        instead of marking the incident finished after the first nested page.
         """
-        short = [item for item in incidents if self._nested_alerts_are_short(item)]
-        if not short or self._deadline_reached():
-            if short and self._deadline_reached():
-                self._incomplete = True
+        tracked = [item for item in incidents if self._needs_related_scan(item)]
+        if not tracked:
+            self._related_scan_offset = 0
             return related_index
-        wanted: set[str] = set()
-        for incident in short:
+        new_ids = [
+            record_id(incident, ENTITY_TYPE_INCIDENT)
+            for incident in tracked
+            if record_id(incident, ENTITY_TYPE_INCIDENT) not in self._open_ids_at_start
+        ]
+        if new_ids:
+            self._related_scan_offset = 0
+        wanted: dict[str, str] = {}
+        for incident in tracked:
             identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
             display_id = record_display_id(incident, ENTITY_TYPE_INCIDENT)
             if identifier:
-                wanted.add(identifier)
+                wanted[identifier] = identifier
             if display_id:
-                wanted.add(display_id)
+                wanted[display_id] = identifier
         self._log(
             "info",
-            "Nested alerts list is short for %s incident(s); loading related "
-            "alerts by incident reference.",
-            len(short),
+            "Nested alerts list is short for %s incident(s); paging related "
+            "alerts from offset %s.",
+            len(tracked),
+            self._related_scan_offset,
         )
-        try:
-            rows = self.manager.get_alerts(
-                self._alert_variables(self._id_lookup_window(window), True),
-                None,
-                deadline_monotonic=self._deadline,
-            )
-            self._mark_if_truncated()
-        except Exception as exc:
-            self._incomplete = True
-            self._log(
-                "warning",
-                "Unable to backfill related Vega alerts: %s",
-                exc,
-            )
-            return related_index
         matched: list[dict] = []
-        for alert in rows:
-            if not isinstance(alert, dict):
-                continue
-            ref_id, _ = related_incident_ref(alert)
-            if ref_id and ref_id in wanted:
+        seen_match: set[str] = set()
+        offset = self._related_scan_offset
+        page_size = max(1, int(GRAPHQL_PAGE_SIZE))
+        variables = self._backfill_variables(window)
+        scan_finished = False
+        while True:
+            if self._deadline_reached():
+                self._related_scan_incomplete = True
+                break
+            try:
+                page = self.manager.get_alerts(
+                    variables,
+                    page_size,
+                    deadline_monotonic=self._deadline,
+                    start_offset=offset,
+                )
+                self._mark_if_truncated()
+            except Exception as exc:
+                self._related_scan_incomplete = True
+                self._log("warning", "Unable to backfill related Vega alerts: %s", exc)
+                break
+            page = [item for item in (page or []) if isinstance(item, dict)]
+            if not page:
+                scan_finished = True
+                break
+            for alert in page:
+                owner_ids = [
+                    wanted[item]
+                    for item in related_incident_ids(alert)
+                    if item in wanted
+                ]
+                if not owner_ids:
+                    continue
+                alert_id = record_id(alert, ENTITY_TYPE_ALERT)
+                if not alert_id or alert_id in seen_match:
+                    continue
+                seen_match.add(alert_id)
                 matched.append(alert)
+            offset += len(page)
+            self._related_scan_offset = offset
+            if getattr(self.manager, "last_fetch_truncated", False) or self._deadline_reached():
+                self._related_scan_incomplete = True
+                break
+            if len(page) < page_size:
+                scan_finished = True
+                break
+        if scan_finished:
+            self._related_scan_incomplete = False
+            self._related_scan_offset = 0
         extra = index_alert_records(matched)
         merged = dict(related_index)
         for key, alert in extra.items():
             merged.setdefault(key, alert)
         self._log(
             "info",
-            "Backfill matched %s related Vega alert(s) for short incident lists.",
-            len({record_id(item, ENTITY_TYPE_ALERT) for item in matched}),
+            "Backfill matched %s related Vega alert(s) for short incident lists "
+            "(scan_offset=%s incomplete=%s).",
+            len(seen_match),
+            self._related_scan_offset,
+            self._related_scan_incomplete,
         )
         return merged
 
@@ -985,6 +1316,171 @@ class IngestionPipeline:
                     seen.add(key)
                     ids.append(key)
         return ids
+
+    def _load_related_backfill(self, state: dict) -> None:
+        saved = state.get("related_backfill")
+        if not isinstance(saved, dict):
+            saved = {}
+            # Checkpoints written before related-alert resume have no scan
+            # state. Reload those incidents once so a short nested page is
+            # not left finished.
+            self._upgrade_incident_ids = [
+                item.split(":", 1)[1]
+                for item in list(state.get("ingested_ids") or [])
+                if str(item).startswith("incident:") and ":" in str(item)
+            ]
+        else:
+            self._upgrade_incident_ids = [
+                str(item)
+                for item in list(saved.get("upgrade_ids") or [])
+                if str(item).strip()
+            ]
+        try:
+            batch_version = int(saved.get("batch_version") or 0)
+        except (TypeError, ValueError):
+            batch_version = 0
+        # Older checkpoints marked every related id sent after one large
+        # return. SecOps kept only part of that return, so send those again.
+        self._replay_related = batch_version < RELATED_BATCH_VERSION
+        try:
+            offset = int(saved.get("offset") or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        self._related_scan_offset = max(offset, 0)
+        self._related_scan_incomplete = False
+        open_related: dict[str, dict] = {}
+        for key, value in dict(saved.get("open") or {}).items():
+            if isinstance(value, dict):
+                open_related[str(key)] = dict(value)
+        self._open_related = open_related
+        settled: dict[str, int] = {}
+        for key, value in dict(saved.get("settled") or {}).items():
+            try:
+                settled[str(key)] = max(int(value), 0)
+            except (TypeError, ValueError):
+                continue
+        self._settled_related = {} if self._replay_related else settled
+        self._open_ids_at_start = set(self._open_related)
+
+    def _include_open_incidents(self, incidents: list[dict]) -> list[dict]:
+        """Re-read incidents whose related-alert scan stopped early."""
+        present = {
+            record_id(item, ENTITY_TYPE_INCIDENT)
+            for item in incidents
+            if record_id(item, ENTITY_TYPE_INCIDENT)
+        }
+        pending_ids = list(self._open_related) + [
+            item for item in self._upgrade_incident_ids if item not in self._open_related
+        ]
+        for incident_id in pending_ids:
+            if incident_id in present or self._deadline_reached():
+                if incident_id in present:
+                    self._upgrade_incident_ids = [
+                        item for item in self._upgrade_incident_ids if item != incident_id
+                    ]
+                continue
+            try:
+                record = self.manager.get_incident(incident_id)
+            except Exception as exc:
+                self._log(
+                    "warning",
+                    "Unable to reload open Vega incident %s: %s",
+                    incident_id,
+                    exc,
+                )
+                continue
+            if not isinstance(record, dict) or not record_id(record, ENTITY_TYPE_INCIDENT):
+                self._upgrade_incident_ids = [
+                    item for item in self._upgrade_incident_ids if item != incident_id
+                ]
+                continue
+            incidents.append(record)
+            present.add(incident_id)
+            self._upgrade_incident_ids = [
+                item for item in self._upgrade_incident_ids if item != incident_id
+            ]
+        return incidents
+
+    def _release_oversized_related(
+        self,
+        incident: dict,
+        ingested: list[str],
+        ingested_set: set[str],
+    ) -> None:
+        """Forget a one-shot send that was larger than SecOps keeps."""
+        if not self._replay_related:
+            return
+        release: set[str] = set()
+        for stub in incident_alert_stubs(incident):
+            for key in record_alert_ids(stub):
+                if key in ingested_set:
+                    release.add(key)
+        if not release:
+            return
+        ingested_set.difference_update(release)
+        ingested[:] = [item for item in ingested if item not in release]
+        label = record_display_id(incident, ENTITY_TYPE_INCIDENT) or record_id(
+            incident, ENTITY_TYPE_INCIDENT
+        )
+        self._log(
+            "info",
+            "Vega incident %s: an earlier run marked %s related alert(s) as "
+            "sent. getAlerts will be called for each of them and each one "
+            "will be packaged.",
+            label,
+            len(release),
+        )
+
+    def _note_related_progress(self, incident: dict, added: int) -> None:
+        """Keep an incident open until every known related alert is packaged."""
+        identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
+        if not identifier:
+            return
+        known = len(incident_alert_ids(incident))
+        expected = max(self._incident_alerts_count(incident), known)
+        previous = int((self._open_related.get(identifier) or {}).get("have") or 0)
+        have = previous + max(int(added or 0), 0)
+        short = self._nested_alerts_are_short(incident)
+        if have >= expected and not short:
+            self._open_related.pop(identifier, None)
+            self._settled_related[identifier] = expected
+            return
+        tracked = (
+            identifier in self._open_related
+            or identifier in self._open_ids_at_start
+            or short
+            or have < known
+        )
+        if not tracked:
+            return
+        unfinished = (
+            self._related_scan_incomplete
+            or self._incomplete
+            or self._deadline_reached()
+        )
+        if have < expected and unfinished:
+            self._remember_open_incident(incident, have)
+            self._log(
+                "info",
+                "Vega incident %s packaged %s of %s related alert(s) this run. "
+                "The connector time limit stopped the rest. The next run "
+                "continues in batches of %s.",
+                identifier,
+                have,
+                expected,
+                MAX_ALERTS_PER_CASE,
+            )
+            return
+        if have < expected and short:
+            self._log(
+                "warning",
+                "Vega incident %s related-alert scan finished with %s of %s alert(s).",
+                identifier,
+                have,
+                expected,
+            )
+        self._open_related.pop(identifier, None)
+        self._settled_related[identifier] = expected
 
     def _ingest_incidents(
         self,
@@ -1012,12 +1508,53 @@ class IngestionPipeline:
         incidents = self._sort_by_timestamp(
             [item for item in incidents if isinstance(item, dict)]
         )
+        self._log_nested_counts(
+            incidents,
+            "Step 1 — incident list",
+            "These counts are from the list query. A short nested alerts "
+            "field is reloaded by id in the next step.",
+        )
+        incidents = self._include_open_incidents(incidents)
+        incidents = self._expand_nested_alert_ids(incidents)
+        self._log_nested_counts(
+            incidents,
+            "Step 2 — nested alert ids",
+            "These are the ids that will be used. alertsCount is Vega's "
+            "total; nested ids is how many ids are actually in hand.",
+        )
+        if include_related and self._replay_related:
+            for incident in incidents:
+                self._release_oversized_related(incident, ingested, ingested_set)
         self._log("info", "Fetched %s Vega incident(s).", len(incidents))
         related_index: dict[str, dict] = {}
         if include_related and incidents and not self._should_stop(len(records)):
             all_alert_ids: list[str] = []
             for incident in incidents:
-                all_alert_ids.extend(self._new_related_alert_ids(incident, ingested_set))
+                pending = self._pending_stubs(incident, ingested_set)
+                nested = len(incident_alert_ids(incident))
+                skipped = max(len(self._ordered_stubs(incident)) - len(pending), 0)
+                batches = (len(self._ordered_stubs(incident)) + MAX_ALERTS_PER_CASE - 1) // MAX_ALERTS_PER_CASE
+                self._log(
+                    "info",
+                    "Step 3 — %s: nested ids=%s, already checkpointed=%s, "
+                    "getAlerts this run=%s, batches of %s=%s. "
+                    "Every batch is sent in this run.",
+                    self._incident_log_label(incident),
+                    nested,
+                    skipped,
+                    len(pending),
+                    MAX_ALERTS_PER_CASE,
+                    batches if self._ordered_stubs(incident) else 0,
+                )
+                all_alert_ids.extend(self._stub_lookup_ids(pending))
+            self._log(
+                "info",
+                "Step 3 — getAlerts will be called for %s id(s) this run, "
+                "%s ids per call, limit %s.",
+                len(all_alert_ids),
+                ALERT_ID_LOOKUP_BATCH,
+                ALERT_ID_LOOKUP_BATCH,
+            )
             related_index = self._fetch_alerts_by_ids(all_alert_ids, window)
             related_index = self._backfill_related_index(incidents, related_index, window)
         for incident in incidents:
@@ -1032,7 +1569,11 @@ class IngestionPipeline:
                 if include_related
                 else []
             )
-            if already_ingested and not pending_related:
+            if (
+                already_ingested
+                and not pending_related
+                and not self._needs_related_scan(incident)
+            ):
                 continue
             if not already_ingested:
                 incident = self._enrich_incident(incident)
@@ -1045,12 +1586,20 @@ class IngestionPipeline:
             )
             self._log(
                 "info",
-                "Vega incident %s has %s related alert(s)%s.",
+                "Vega incident %s: found %s related alert id(s)%s.",
                 identifier,
                 len(related),
-                "" if include_related else " (not nested)",
+                "" if include_related else " (not nested into cases)",
             )
+            before = len(records)
             self._emit_incident_cases(incident, related, records, ingested, ingested_set)
+            if include_related:
+                added = sum(
+                    1
+                    for kind, _record in records[before:]
+                    if kind == ENTITY_TYPE_ALERT
+                )
+                self._note_related_progress(incident, added)
 
     def _append_standalone_alert(
         self,
@@ -1328,6 +1877,7 @@ class IngestionPipeline:
         self._incomplete = False
         self._progress_ts = None
         self._deadline = deadline_monotonic
+        self._load_related_backfill(state)
 
         checkpoint_ids = len(ingested_set)
         self._log(
@@ -1373,6 +1923,16 @@ class IngestionPipeline:
             ingested = ingested[-INGESTED_ID_CAP:]
         state["ingested_ids"] = ingested
         state["origin_from"] = window.get("origin_from") or state.get("origin_from")
+        if not self._open_related:
+            self._related_scan_offset = 0
+            self._related_scan_incomplete = False
+        state["related_backfill"] = {
+            "offset": self._related_scan_offset,
+            "open": self._open_related,
+            "settled": self._settled_related,
+            "upgrade_ids": list(self._upgrade_incident_ids),
+            "batch_version": RELATED_BATCH_VERSION,
+        }
         if self._incomplete:
             # Keep the previous watermark when this cycle packaged nothing.
             if self._progress_ts is not None:
@@ -1383,11 +1943,16 @@ class IngestionPipeline:
             state["watermark"] = window["end"]
             state["incomplete"] = False
             state["query_mode"] = "updated"
+        incident_records = sum(1 for kind, _record in records if kind == ENTITY_TYPE_INCIDENT)
+        alert_records = sum(1 for kind, _record in records if kind == ENTITY_TYPE_ALERT)
         self._log(
             "info",
-            "Ingest complete: emitting %s new record(s) (checkpoint had %s id(s), "
-            "incomplete=%s watermark=%s).",
+            "Step 6 — package ready: %s record(s) will be turned into SecOps "
+            "alerts (%s incident, %s alert). Checkpoint already held %s id(s). "
+            "incomplete=%s watermark=%s. Nothing in this list was cut to 250.",
             len(records),
+            incident_records,
+            alert_records,
             checkpoint_ids,
             self._incomplete,
             state.get("watermark"),

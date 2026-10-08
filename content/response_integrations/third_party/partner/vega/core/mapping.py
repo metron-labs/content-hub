@@ -184,31 +184,40 @@ def case_display_name(record: dict, entity_type: str) -> str:
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} TEST 232"
-    return f"Vega {entity_type} - {name} TEST 232"
+        return f"Vega {entity_type} - {display_id} - {name} TEST 260"
+    return f"Vega {entity_type} - {name} TEST 260"
 
 
-def incident_case_title(record: dict, related_batch: int = 0) -> str:
-    """SOAR case title for an incident-only case or a related-alert batch.
+# Marks the related-alert case so close-sync does not treat it as the incident.
+RELATED_ALERTS_TITLE_MARK = "(related alerts)"
 
-    related_batch 0 is the Vega incident case. related_batch >= 1 is a
-    related-alert case named after the incident with ``(batch N)``.
+
+def incident_case_title(record: dict, related: bool = False, batch: int | None = None) -> str:
+    """SOAR case title for the incident case or one related-alert chunk.
+
+    Titles still use ``(batch N)`` in chunks of 90. Grouping does not follow
+    the batch number; every related alert shares one identifier.
     """
     title = case_display_name(record, ENTITY_TYPE_INCIDENT)
-    if related_batch and related_batch > 0:
-        return f"{title} (batch {related_batch})"
+    if batch:
+        return f"{title} (batch {int(batch)})"
+    if related:
+        return f"{title} {RELATED_ALERTS_TITLE_MARK}"
     return title
 
 
-def incident_grouping_id(incident_id: str, related_batch: int = 0) -> str:
-    """SOAR source grouping key. Incident and related-alert batches stay separate.
+def incident_grouping_id(
+    incident_id: str, related: bool = False, batch: int | None = None
+) -> str:
+    """SOAR source grouping key.
 
-    related_batch 0 is ``Vega:incident:<id>``. related_batch >= 1 is
-    ``Vega:incident:<id>:batch:N`` so the grouping rule does not merge them.
+    The incident case is ``Vega:incident:<id>``. Every related alert of that
+    incident shares ``Vega:incident:<id>:related``. SecOps splits that group
+    at max alerts per case. ``batch`` does not change the key.
     """
     base = f"{VENDOR_NAME}:incident:{incident_id}"
-    if related_batch and related_batch > 0:
-        return f"{base}:batch:{related_batch}"
+    if related or batch:
+        return f"{base}:related"
     return base
 
 
@@ -446,22 +455,6 @@ def incident_alert_ids(incident: dict) -> list[str]:
     return ids
 
 
-def chunk_case_alerts(related_alerts: list, max_alerts_per_case: int) -> list[list]:
-    """Split related alerts into SOAR cases of at most ``max`` alerts each.
-
-    The Vega incident is a separate case, so every chunk can hold the full
-    cap (90). Zero related alerts yields no chunks.
-    """
-    limit = max(1, int(max_alerts_per_case))
-    if not related_alerts:
-        return []
-    chunks: list[list] = []
-    items = list(related_alerts)
-    for index in range(0, len(items), limit):
-        chunks.append(items[index : index + limit])
-    return chunks
-
-
 def stub_to_alert(stub: dict) -> dict:
     stub = stub if isinstance(stub, dict) else {}
     alert_id = str(
@@ -500,15 +493,27 @@ def merge_related_alert(stub: dict, full: dict | None) -> dict:
     return merged
 
 
-def related_incident_ref(alert: dict) -> tuple[str, str]:
+def _related_incident_items(alert: dict) -> list[dict]:
     related = alert.get("relatedIncidents") if isinstance(alert, dict) else None
     if isinstance(related, dict):
         related = [related]
     if not isinstance(related, list):
-        return "", ""
-    for item in related:
-        if not isinstance(item, dict):
-            continue
+        return []
+    return [item for item in related if isinstance(item, dict)]
+
+
+def related_incident_ids(alert: dict) -> list[str]:
+    """Every incident id on the alert. The first entry is not the only link."""
+    ids: list[str] = []
+    for item in _related_incident_items(alert):
+        identifier = str(item.get("incidentId") or item.get("id") or "").strip()
+        if identifier and identifier not in ids:
+            ids.append(identifier)
+    return ids
+
+
+def related_incident_ref(alert: dict) -> tuple[str, str]:
+    for item in _related_incident_items(alert):
         identifier = str(item.get("incidentId") or item.get("id") or "").strip()
         if identifier:
             return identifier, str(item.get("name") or "").strip()
@@ -838,10 +843,9 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
         or (
             SOAR_ALERT_TYPE_INCIDENT
             if entity_type == ENTITY_TYPE_INCIDENT
-            else SOAR_ALERT_TYPE_ALERT
+            else             SOAR_ALERT_TYPE_ALERT
         )
     )
-    grouping_id = str(meta.get("grouping_id") or "")
     event = {
         "StartTime": start_time,
         "EndTime": end_time,
@@ -865,7 +869,6 @@ def build_event_dict(record: dict, entity_type: str, start_time: int, end_time: 
         alert_ids = related_alert_ids(rows)
         event["vega_related_alert_ids"] = ",".join(alert_ids) if alert_ids else "[]"
         event["vega_alerts"] = _soar_value(rows, limit=_MAX_DETAILS_CHARS)
-    _set_mapped(event, "source_grouping_identifier", grouping_id)
     _set_mapped(event, "vega_incident_id", incident_id)
     if entity_type == ENTITY_TYPE_INCIDENT:
         _map_api_fields(event, record, _INCIDENT_API_FIELDS)
@@ -1061,7 +1064,6 @@ def build_vega_alert_event_dict(
     ).strip()
     meta = soar_meta(parent)
     incident_id = str(meta.get("incident_id") or parent.get("vega_incident_id") or "").strip()
-    grouping_id = str(meta.get("grouping_id") or "")
     event = {
         "StartTime": start_time,
         "EndTime": end_time,
@@ -1077,7 +1079,6 @@ def build_vega_alert_event_dict(
         "Severity": record_severity(parent),
         "vega_entity_type": "Alert Event",
     }
-    _set_mapped(event, "source_grouping_identifier", grouping_id)
     _set_mapped(event, "vega_alert_id", parent.get("vegaAlertId"))
     _set_mapped(event, "vega_incident_id", incident_id)
     extra = 0

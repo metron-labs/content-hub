@@ -4,7 +4,8 @@ Vega Alerts and Incidents Connector.
 1. Read connector configuration (API, entities, filters, Has Related Incidents).
 2. IngestionPipeline applies those filters:
    - Incidents+Alerts+Yes: one incident-only case, plus related Vega alerts
-     in separate batch cases (up to 90 alerts each).
+     that share one source grouping identifier. SecOps groups them up to
+     the tenant maxAlertsInCase.
    - Incidents+Alerts+No: incident-only case plus standalone unrelated alerts.
    - Incidents only: Vega Incident cases only (no related or unrelated alerts).
    - Alerts+Yes: one case per related Vega alert (no incident case).
@@ -12,7 +13,7 @@ Vega Alerts and Incidents Connector.
    Each packaged record is a SOAR alert inside its case.
 3. Packager turns records into SOAR AlertInfo objects. Optional outbound
    sync sets Vega userStatus to RESOLVED when the matching SOAR case closes
-   (incident case → incident only; alert/batch case → those alerts only).
+   (incident case → incident only; related-alert or alert case → those alerts only).
 """
 from __future__ import annotations
 
@@ -275,10 +276,17 @@ def _run_ingest(siemplify, params) -> list:
     budget = max(timeout_seconds - INGEST_STOP_BUFFER_SECONDS, 15)
     deadline = time.monotonic() + budget
     summary = pipeline.run(checkpoint=checkpoint, deadline_monotonic=deadline)
-    alerts = create_alerts(summary.get("records") or [], siemplify, siemplify.LOGGER)
+    records = summary.get("records") or []
+    alerts = create_alerts(records, siemplify, siemplify.LOGGER)
+    incident_packages = sum(1 for kind, _record in records if kind == "Incident")
+    alert_packages = sum(1 for kind, _record in records if kind == "Alert")
     siemplify.LOGGER.info(
-        f"Fetched {summary.get('fetched') or 0} Vega record(s); "
-        f"built {len(alerts)} alert package(s)."
+        f"Step 7 — handing {len(alerts)} alert package(s) to SecOps "
+        f"({incident_packages} incident, {alert_packages} alert). "
+        "This is the full list. The connector does not trim it to 250. "
+        "SecOps creates the cases after this handoff. "
+        f"If the case queue total is lower than {len(alerts)}, SecOps kept "
+        "fewer packages than this run returned."
     )
     if summary.get("incomplete"):
         siemplify.LOGGER.info(

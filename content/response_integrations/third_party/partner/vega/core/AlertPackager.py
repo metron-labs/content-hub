@@ -109,52 +109,12 @@ def event_start_end(payload: dict, parent_start: int, parent_end: int) -> tuple[
     return min(times), max(times)
 
 
-_PINNED_TIME_KEYS = {
-    "createdat",
-    "updatedat",
-    "lastupdated",
-    "created_at",
-    "updated_at",
-    "last_updated",
-}
-
-
-def _pin_related_event(event: dict, start_time: int, end_time: int) -> None:
-    """Force one window so SecOps does not split a batch on event time.
-
-    Grouping by source identifier ignores the 24-hour setting only when every
-    alert in the batch carries that same identifier. Per-alert createdAt and
-    child-event times make the platform fall back to entity grouping, which
-    does use the 24-hour window and opens a new case per alert.
-    """
-    if not isinstance(event, dict):
-        return
-    original_created = event.get("created_at") or event.get("createdAt")
-    original_updated = (
-        event.get("updated_at") or event.get("updatedAt") or event.get("lastUpdated")
-    )
-    event["StartTime"] = start_time
-    event["EndTime"] = end_time
-    for key in list(event.keys()):
-        folded = str(key).lower()
-        compact = folded.replace("_", "")
-        if compact in {"starttime", "endtime"}:
-            continue
-        if "time" in folded or compact in _PINNED_TIME_KEYS or folded in _PINNED_TIME_KEYS:
-            event.pop(key, None)
-    if original_created not in (None, ""):
-        event["vega_alert_created_at"] = str(original_created)
-    if original_updated not in (None, ""):
-        event["vega_alert_updated_at"] = str(original_updated)
-
-
 def _attach_child_events(
     alert,
     record: dict,
     parent_start: int,
     parent_end: int,
     logger_instance=None,
-    pin_to_parent: bool = False,
 ) -> None:
     identifier = record_id(record, ENTITY_TYPE_ALERT)
     child_events = list(record.get("alert_events") or [])
@@ -171,17 +131,12 @@ def _attach_child_events(
     for index, vega_event in enumerate(child_events):
         payload = vega_event if isinstance(vega_event, dict) else {}
         normalized = normalize_alert_event(payload) if payload else {}
-        if pin_to_parent:
-            child_start, child_end = parent_start, parent_end
-        else:
-            child_start, child_end = event_start_end(
-                normalized, parent_start, parent_end
-            )
+        child_start, child_end = event_start_end(
+            normalized, parent_start, parent_end
+        )
         child = build_vega_alert_event_dict(
             record, vega_event, child_start, child_end, index
         )
-        if pin_to_parent:
-            _pin_related_event(child, parent_start, parent_end)
         alert.events.append(child)
 
 
@@ -189,13 +144,10 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
     """Turn pipeline records into SOAR AlertInfo packages.
 
     Incident case: one AlertInfo for the Vega incident. Related Vega alerts
-    are separate AlertInfo objects with a batch grouping id so they form their
-    own cases. Each alert keeps its own Name (Vega Incident vs Vega Alert).
-    Related batches share Product, Rule Generator (the incident title plus
-    batch N), and the incident createdAt/lastUpdated window. SecOps groups on
-    that shared window, so a batch stays one case up to the 90-alert cap.
-    The incident case and standalone alerts use their own createdAt and last
-    update.
+    are separate AlertInfo objects that share one source grouping identifier
+    so SecOps groups them up to the tenant maxAlertsInCase. Each alert keeps
+    its own Name, createdAt, and last update. Related alerts share Product
+    and Rule Generator. The incident case uses a different grouping id.
     """
     from soar_sdk.SiemplifyConnectorsDataModel import AlertInfo
     from soar_sdk.SiemplifyUtils import unix_now
@@ -214,18 +166,7 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
         if not identifier:
             continue
         meta = soar_meta(record)
-        if meta.get("is_related_batch"):
-            # One window for the whole batch. Per-alert createdAt values are
-            # often days apart, and SecOps then opens a new case for each.
-            start_time, end_time = record_start_end(
-                {
-                    "createdAt": meta.get("grouping_start") or meta.get("grouping_time"),
-                    "lastUpdated": meta.get("grouping_end") or meta.get("grouping_time"),
-                },
-                current_time,
-            )
-        else:
-            start_time, end_time = record_start_end(record, current_time)
+        start_time, end_time = record_start_end(record, current_time)
         severity = record_severity(record)
         ticket_suffix = str(meta.get("ticket_suffix") or "").strip()
         ticket_key = f"{identifier}:{ticket_suffix}" if ticket_suffix else identifier
@@ -274,11 +215,8 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
             "vega_entity_type": entity_type,
             "vega_id": identifier,
             "vega_incident_id": incident_id,
-            "source_grouping_identifier": grouping_id,
         }
         parent_event = build_event_dict(record, entity_type, start_time, end_time)
-        if meta.get("is_related_batch"):
-            _pin_related_event(parent_event, start_time, end_time)
         alert.events.append(parent_event)
         if entity_type == ENTITY_TYPE_ALERT:
             _attach_child_events(
@@ -287,20 +225,9 @@ def create_alerts(records: list[tuple[str, dict]], siemplify, logger_instance=No
                 start_time,
                 end_time,
                 logger_instance,
-                pin_to_parent=bool(meta.get("is_related_batch")),
             )
         # Do not set AlertInfo.case_tags here. SecOps treats each ingest
         # write plus playbook add_tag as a new catalog tag, which duplicates
         # names. Events still carry labels for Apply Vega Labels as Tags.
         packages.append(alert)
-        safe_log(
-            logger_instance,
-            "info",
-            "Packaged Vega %s %s with %s event(s) (grouping=%s title=%s).",
-            entity_type,
-            identifier,
-            len(alert.events),
-            grouping_id,
-            alert_name,
-        )
     return packages

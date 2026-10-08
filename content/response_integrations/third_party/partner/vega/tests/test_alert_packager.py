@@ -76,8 +76,8 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
             "labels": [{"name": "phish", "color": "#ff0000"}],
             "alert_events": [{"name": "login"}],
         },
-        grouping_id="Vega:incident:inc-1:batch:1",
-        case_title=f"{case_title} (batch 1)",
+        grouping_id="Vega:incident:inc-1:related",
+        case_title=f"{case_title} (related alerts)",
         grouping_time="2026-07-28T11:22:43Z",
         incident_id="inc-1",
         is_incident_case=True,
@@ -110,7 +110,7 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
     assert len(packages) == 3
     incident_alert, related_alert, standalone = packages
     assert incident_alert.rule_generator == case_title
-    assert related_alert.rule_generator == f"{case_title} (batch 1)"
+    assert related_alert.rule_generator == f"{case_title} (related alerts)"
     assert incident_alert.name.startswith("Vega Incident - VINC-1 - Campaign")
     assert related_alert.name.startswith("Vega Alert - VALERT-1 - Phish")
     assert "Vega Alert" not in incident_alert.rule_generator
@@ -121,7 +121,7 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
     assert related_alert.device_product == "Vega"
     assert standalone.device_product == "Vega"
     assert incident_alert.source_grouping_identifier == "Vega:incident:inc-1"
-    assert related_alert.source_grouping_identifier == "Vega:incident:inc-1:batch:1"
+    assert related_alert.source_grouping_identifier == "Vega:incident:inc-1:related"
     assert standalone.source_grouping_identifier == "Vega:alert:alert-3"
     assert incident_alert.start_time == incident_alert.events[0]["StartTime"]
     assert incident_alert.end_time == incident_alert.events[0]["EndTime"]
@@ -145,7 +145,9 @@ def test_packager_related_alerts_share_case_title_not_alert_type() -> None:
     assert len(related_alert.events) == 2
     assert related_alert.events[0]["name"].startswith("Vega Alert - VALERT-1 - Phish")
     assert related_alert.events[1]["name"] == "login"
-    assert related_alert.events[0]["source_grouping_identifier"] == "Vega:incident:inc-1:batch:1"
+    assert "SourceGroupingIdentifier" not in related_alert.extensions
+    assert "sourceGroupIdentifier" not in related_alert.events[0]
+    assert "SourceGroupingIdentifier" not in related_alert.events[0]
     assert json.loads(incident_alert.events[0]["labels"]) == [
         {"name": "campaign", "color": "#00aa00"}
     ]
@@ -186,8 +188,8 @@ def test_packager_keeps_empty_labels_and_incident_tag_names() -> None:
             "name": "Phish",
             "labels": [],
         },
-        grouping_id="Vega:incident:inc-1:batch:1",
-        case_title=f"{case_title} (batch 1)",
+        grouping_id="Vega:incident:inc-1:related",
+        case_title=f"{case_title} (related alerts)",
         incident_id="inc-1",
         incident_label_tags=["campaign"],
         is_incident_case=True,
@@ -199,9 +201,9 @@ def test_packager_keeps_empty_labels_and_incident_tag_names() -> None:
             "name": "Beacon",
             "labels": [{"name": "beacon"}],
         },
-        grouping_id="Vega:incident:inc-1:batch:2",
+        grouping_id="Vega:incident:inc-1:related",
         case_tags=["campaign", "beacon"],
-        case_title=f"{case_title} (batch 2)",
+        case_title=f"{case_title} (related alerts)",
         incident_id="inc-1",
         incident_label_tags=["campaign"],
         is_incident_case=True,
@@ -248,7 +250,7 @@ def test_packager_keeps_empty_labels_and_incident_tag_names() -> None:
     assert standalone.case_tags is None
 
 
-def test_related_batch_shares_incident_time_window() -> None:
+def test_related_alerts_keep_their_own_timestamps() -> None:
     incident = set_soar_meta(
         {
             "id": "inc-1",
@@ -270,8 +272,8 @@ def test_related_batch_shares_incident_time_window() -> None:
             "createdAt": "2026-01-01T00:00:00Z",
             "updatedAt": "2026-01-02T00:00:00Z",
         },
-        grouping_id="Vega:incident:inc-1:batch:1",
-        case_title="Vega Incident - VINC-1 - Campaign (batch 1)",
+        grouping_id="Vega:incident:inc-1:related",
+        case_title="Vega Incident - VINC-1 - Campaign (related alerts)",
         grouping_start="2026-07-28T11:22:43Z",
         grouping_end="2026-07-29T01:00:00Z",
         is_incident_case=True,
@@ -288,8 +290,8 @@ def test_related_batch_shares_incident_time_window() -> None:
                 {"name": "login", "_time": "2026-01-01T00:00:00Z"}
             ],
         },
-        grouping_id="Vega:incident:inc-1:batch:1",
-        case_title="Vega Incident - VINC-1 - Campaign (batch 1)",
+        grouping_id="Vega:incident:inc-1:related",
+        case_title="Vega Incident - VINC-1 - Campaign (related alerts)",
         grouping_start="2026-07-28T11:22:43Z",
         grouping_end="2026-07-29T01:00:00Z",
         is_incident_case=True,
@@ -299,7 +301,7 @@ def test_related_batch_shares_incident_time_window() -> None:
         context=SimpleNamespace(connector_info=SimpleNamespace(environment="Default"))
     )
     _install_fake_sdk()
-    from core.AlertPackager import create_alerts
+    from core.AlertPackager import create_alerts, record_start_end
 
     packages = create_alerts(
         [
@@ -310,18 +312,19 @@ def test_related_batch_shares_incident_time_window() -> None:
         siemplify,
     )
     incident_alert, older_alert, newer_alert = packages
-    assert incident_alert.start_time == older_alert.start_time == newer_alert.start_time
-    assert incident_alert.end_time == older_alert.end_time == newer_alert.end_time
-    assert older_alert.start_time == 1_785_237_763_000
-    assert older_alert.end_time == 1_785_286_800_000
-    assert older_alert.events[0]["StartTime"] == older_alert.start_time
-    assert older_alert.events[0]["EndTime"] == older_alert.end_time
-    assert "created_at" not in newer_alert.events[0]
-    assert "updated_at" not in newer_alert.events[0]
-    assert newer_alert.events[0]["vega_alert_created_at"] == "2026-04-05T01:18:35Z"
-    assert newer_alert.events[1]["StartTime"] == newer_alert.start_time
-    assert newer_alert.events[1]["EndTime"] == newer_alert.end_time
-    assert "_time" not in newer_alert.events[1]
+    older_start, older_end = record_start_end(older, 1)
+    newer_start, newer_end = record_start_end(newer, 1)
+    assert older_alert.start_time == older_start
+    assert older_alert.end_time == older_end
+    assert newer_alert.start_time == newer_start
+    assert newer_alert.end_time == newer_end
+    assert incident_alert.start_time != older_alert.start_time
+    assert older_alert.start_time != newer_alert.start_time
+    assert older_alert.events[0]["created_at"] == "2026-01-01T00:00:00Z"
+    assert newer_alert.events[0]["created_at"] == "2026-04-05T01:18:35Z"
+    assert newer_alert.events[0]["updated_at"] == "2026-04-06T02:00:00Z"
+    assert "vega_alert_created_at" not in newer_alert.events[0]
+    assert newer_alert.events[1]["StartTime"] != newer_alert.start_time
 
 
 def test_record_start_is_created_at_and_end_is_last_update() -> None:

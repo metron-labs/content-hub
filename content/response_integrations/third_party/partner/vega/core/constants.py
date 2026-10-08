@@ -63,12 +63,9 @@ MAX_EVENTS_PER_ALERT = 200
 # Nested related Vega alerts are attached as events on the incident AlertInfo
 # (SOAR creates one case per AlertInfo unless grouping is enabled).
 NESTED_RELATED_KEY = "nested_related_alerts"
-# Google SecOps hard cap is 90 alerts per case (default grouping is 20).
-# Related Vega alerts are their own cases, chunked at this cap. The Vega
-# incident is always a separate one-alert case.
-MAX_ALERTS_PER_CASE = 90
 SYNC_RESOLVED_STATUS = "RESOLVED"
-ALERT_ID_LOOKUP_BATCH = 10
+# getAlerts(alertIds) accepts up to 1000 ids, and limit may be 1000.
+ALERT_ID_LOOKUP_BATCH = 1000
 # getAlerts(alertIds) for incident metadata. One request may carry this many
 # UUIDs; the response is still paged with limit/offset.
 ALERT_METADATA_ID_BATCH = 1000
@@ -84,6 +81,12 @@ INGEST_STOP_BUFFER_SECONDS = 90
 SERVER_ERROR_RETRIES = 3
 SERVER_ERROR_WAIT_SECONDS = 2
 INGESTED_ID_CAP = 5000
+# Case-title chunks for related alerts. The source grouping identifier stays
+# Vega:incident:<id>:related for every related alert. SecOps splits that
+# group at max alerts per case.
+MAX_ALERTS_PER_CASE = 90
+# Bump when a previous return marked ids sent that were not all created.
+RELATED_BATCH_VERSION = 4
 # getAlerts(alertIds) needs a time bound; related alerts can be older than the
 # ingest window, so ID lookups use this createdAt/updatedAt floor.
 ALERT_ID_LOOKUP_FROM = "2015-01-01T00:00:00.000Z"

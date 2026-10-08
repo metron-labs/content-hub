@@ -468,23 +468,26 @@ class VegaManager:
         variables: dict,
         max_records: Optional[int] = None,
         deadline_monotonic: Optional[float] = None,
+        start_offset: int = 0,
+        page_size: Optional[int] = None,
     ) -> list:
         collected: list = []
-        offset = 0
+        offset = max(int(start_offset or 0), 0)
         truncated = False
+        requested_page = GRAPHQL_PAGE_SIZE if page_size is None else max(int(page_size), 1)
         while True:
             if collected and self._deadline_passed(deadline_monotonic):
                 truncated = True
                 break
             if max_records is not None and len(collected) >= max_records:
                 break
-            page_size = GRAPHQL_PAGE_SIZE
+            page_limit = requested_page
             if max_records is not None:
-                page_size = min(GRAPHQL_PAGE_SIZE, max_records - len(collected))
-                if page_size <= 0:
+                page_limit = min(requested_page, max_records - len(collected))
+                if page_limit <= 0:
                     break
             page_vars = dict(variables)
-            page_vars["limit"] = page_size
+            page_vars["limit"] = page_limit
             page_vars["offset"] = offset
             data = self.graphql(query, page_vars)
             envelope = data.get(envelope_key) or {}
@@ -515,7 +518,7 @@ class VegaManager:
             total = envelope.get("total")
             if total is not None and offset >= int(total):
                 break
-            if len(records) < page_vars["limit"]:
+            if len(records) < page_limit:
                 break
             if self._deadline_passed(deadline_monotonic):
                 truncated = True
@@ -530,8 +533,14 @@ class VegaManager:
         variables: dict,
         max_records: Optional[int] = None,
         deadline_monotonic: Optional[float] = None,
+        start_offset: int = 0,
+        page_size: Optional[int] = None,
     ) -> list:
-        """Page getAlerts. Pass alertIds to resolve incident-related alerts."""
+        """Page getAlerts. Pass alertIds to resolve incident-related alerts.
+
+        start_offset resumes a previous scan instead of reading page 0 again.
+        page_size is the GraphQL limit. Id lookups use up to 1000.
+        """
         self.last_fetch_truncated = False
         return self._paged(
             GET_ALERTS_QUERY,
@@ -540,6 +549,8 @@ class VegaManager:
             variables,
             max_records,
             deadline_monotonic=deadline_monotonic,
+            start_offset=start_offset,
+            page_size=page_size,
         )
 
     def get_incidents(

@@ -18,7 +18,6 @@ from core.mapping import (
     build_event_dict,
     build_vega_alert_event_dict,
     case_display_name,
-    chunk_case_alerts,
     collect_label_tags,
     incident_alert_ids,
     incident_case_title,
@@ -47,9 +46,10 @@ def test_case_display_name_uses_entity_display_id_and_name() -> None:
     ).startswith("Vega Incident - VINC-1 - Campaign")
     incident = {"vegaUniqueIncidentId": "VINC-1", "name": "Campaign"}
     assert incident_case_title(incident).startswith("Vega Incident - VINC-1 - Campaign")
-    assert "(batch" not in incident_case_title(incident)
-    assert incident_case_title(incident, 1).endswith("(batch 1)")
-    assert incident_case_title(incident, 2).endswith("(batch 2)")
+    assert "(related alerts)" not in incident_case_title(incident)
+    related_title = incident_case_title(incident, related=True)
+    assert related_title.endswith("(related alerts)")
+    assert incident_case_title(incident, related=True) == related_title
     uuid = "019e1b27-5119-7822-bde3-344b13e481cf"
     assert case_display_name(
         {"id": uuid, "alertId": uuid, "vegaAlertId": "VALERT-9", "name": "Persist"},
@@ -343,16 +343,18 @@ def test_related_incident_ref() -> None:
 
 def test_grouping_ids() -> None:
     assert incident_grouping_id("inc-1") == "Vega:incident:inc-1"
-    assert incident_grouping_id("inc-1", 0) == "Vega:incident:inc-1"
-    assert incident_grouping_id("inc-1", 1) == "Vega:incident:inc-1:batch:1"
-    assert incident_grouping_id("inc-1", 2) == "Vega:incident:inc-1:batch:2"
+    assert incident_grouping_id("inc-1", related=False) == "Vega:incident:inc-1"
+    assert incident_grouping_id("inc-1", related=True) == "Vega:incident:inc-1:related"
+    assert incident_grouping_id("inc-1", batch=1) == "Vega:incident:inc-1:related"
+    assert incident_grouping_id("inc-1", batch=2) == "Vega:incident:inc-1:related"
+    assert incident_case_title({"name": "Campaign"}, batch=2).endswith("(batch 2)")
     assert alert_grouping_id("a-1") == "Vega:alert:a-1"
     assert is_graphql_alert_id("019e1b27-5119-7822-bde3-344b13e481cf")
     assert not is_graphql_alert_id("VEGA-3219")
     assert not is_graphql_alert_id("alert-1")
 
 
-def test_incident_alert_ids_and_case_chunks() -> None:
+def test_incident_alert_ids() -> None:
     incident = {
         "alerts": [
             {"alertId": "alert-1", "name": "Phish"},
@@ -361,15 +363,6 @@ def test_incident_alert_ids_and_case_chunks() -> None:
         ]
     }
     assert incident_alert_ids(incident) == ["alert-1", "alert-2"]
-    chunks = chunk_case_alerts(["a", "b", "c", "d", "e"], max_alerts_per_case=3)
-    assert chunks == [["a", "b", "c"], ["d", "e"]]
-    assert chunk_case_alerts([], max_alerts_per_case=90) == []
-    overflow = chunk_case_alerts(list(range(806)), max_alerts_per_case=90)
-    assert len(overflow[0]) == 90
-    assert all(len(chunk) == 90 for chunk in overflow[:-1])
-    assert len(overflow[-1]) == 86
-    assert sum(len(chunk) for chunk in overflow) == 806
-    assert len(overflow) == 9
 
 
 def test_summary_event_carries_incident_id_and_alert_type() -> None:
@@ -678,7 +671,7 @@ def test_alert_event_payload_maps_dynamic_api_fields() -> None:
     assert "null_field" not in event
     assert "empty_list" not in event
     assert "vega_incident_id" not in event
-    assert "source_grouping_identifier" not in event
+    assert "SourceGroupingIdentifier" not in event
 
 
 def test_child_event_overwrites_invalid_payload_times() -> None:
@@ -800,11 +793,11 @@ def test_extract_sync_targets_ticket_id_when_events_dropped() -> None:
     assert targets["incident_ids"] == [uuid]
 
 
-def test_extract_sync_targets_batch_title_does_not_close_incident() -> None:
+def test_extract_sync_targets_related_title_does_not_close_incident() -> None:
     uuid = "019eea19-551b-7b19-8582-faff640969ff"
     targets = extract_sync_targets(
         {
-            "title": "Vega Incident - VINC-1 - phishing (batch 1)",
+            "title": "Vega Incident - VINC-1 - phishing (related alerts)",
             "events": [
                 {
                     "vegaEntityType": "Alert",
@@ -817,6 +810,19 @@ def test_extract_sync_targets_batch_title_does_not_close_incident() -> None:
     assert targets["mode"] == "alerts"
     assert targets["alert_ids"] == ["alert-1"]
     assert targets["incident_ids"] == []
+
+
+def test_extract_sync_targets_legacy_batch_title_does_not_close_incident() -> None:
+    uuid = "019eea19-551b-7b19-8582-faff640969ff"
+    targets = extract_sync_targets(
+        {
+            "title": "Vega Incident - VINC-1 - phishing (batch 1)",
+            "cyberAlerts": [{"ticketId": f"Vega:{uuid}"}],
+        }
+    )
+    assert targets["mode"] == "alerts"
+    assert targets["incident_ids"] == []
+    assert targets["alert_ids"] == [uuid]
 
 
 def test_soar_meta_round_trip() -> None:

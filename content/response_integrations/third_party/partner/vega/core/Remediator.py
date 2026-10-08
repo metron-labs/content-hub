@@ -243,7 +243,7 @@ def extract_sync_targets(case_payload: dict) -> dict:
     """Classify a closed case as incident-only or alerts-only.
 
     Incident case → resolve the Vega incident only.
-    Related-alert batch or unrelated alert case → resolve those Vega alerts
+    Related-alert case or unrelated alert case → resolve those Vega alerts
     only. ``vega_incident_id`` on related alerts is not a close target.
     """
     incident_ids: list[str] = []
@@ -492,12 +492,19 @@ def _case_title(row: dict) -> str:
 
 
 def _is_incident_case_title(payload: dict) -> bool:
-    """True for the Vega incident case, not related-alert ``(batch N)`` cases."""
+    """True for the Vega incident case, not the related-alerts case.
+
+    ``(related alerts)`` is the current title. ``(batch N)`` is kept so cases
+    ingested before grouping moved to one source identifier still resolve
+    alerts instead of the incident.
+    """
+    from .mapping import RELATED_ALERTS_TITLE_MARK
+
     title = _case_title(payload)
     if not title:
         return False
     lowered = title.lower()
-    if "(batch " in lowered:
+    if RELATED_ALERTS_TITLE_MARK in lowered or "(batch " in lowered:
         return False
     return lowered.startswith(SOAR_ALERT_TYPE_INCIDENT.lower())
 
