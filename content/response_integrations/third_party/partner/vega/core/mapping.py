@@ -184,8 +184,8 @@ def case_display_name(record: dict, entity_type: str) -> str:
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} TEST 297"
-    return f"Vega {entity_type} - {name} TEST 297"
+        return f"Vega {entity_type} - {display_id} - {name} TEST 300"
+    return f"Vega {entity_type} - {name} TEST 300"
 
 
 # Marks the related-alert case so close-sync does not treat it as the incident.
@@ -200,7 +200,7 @@ def incident_case_title(record: dict, related: bool = False, batch: int | None =
     """
     title = case_display_name(record, ENTITY_TYPE_INCIDENT)
     if batch:
-        return f"{title} (batch {int(batch)})"
+        return f"{title} (cluster {int(batch)})"
     if related:
         return f"{title} {RELATED_ALERTS_TITLE_MARK}"
     return title
@@ -217,7 +217,7 @@ def incident_grouping_id(
     """
     base = f"{VENDOR_NAME}:incident:{incident_id}"
     if batch:
-        return f"{base}:related:batch:{int(batch)}"
+        return f"{base}:related:cluster:{int(batch)}"
     if related:
         return f"{base}:related"
     return base
