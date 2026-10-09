@@ -81,12 +81,11 @@ INGEST_STOP_BUFFER_SECONDS = 90
 SERVER_ERROR_RETRIES = 3
 SERVER_ERROR_WAIT_SECONDS = 2
 INGESTED_ID_CAP = 5000
-# Case-title chunks for related alerts. The source grouping identifier stays
-# Vega:incident:<id>:related for every related alert. SecOps splits that
-# group at max alerts per case.
+# Related-alert case chunks: titles use (batch N) and grouping id
+# Vega:incident:<id>:related:batch:<N>, with N from a per-incident checkpoint.
 MAX_ALERTS_PER_CASE = 90
 # Bump when a previous return marked ids sent that were not all created.
-RELATED_BATCH_VERSION = 4
+RELATED_BATCH_VERSION = 5
 # getAlerts(alertIds) needs a time bound; related alerts can be older than the
 # ingest window, so ID lookups use this createdAt/updatedAt floor.
 ALERT_ID_LOOKUP_FROM = "2015-01-01T00:00:00.000Z"

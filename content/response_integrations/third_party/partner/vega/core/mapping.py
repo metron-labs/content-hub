@@ -184,8 +184,8 @@ def case_display_name(record: dict, entity_type: str) -> str:
     display_id = record_display_id(record, entity_type)
     name = record_name(record)
     if display_id:
-        return f"Vega {entity_type} - {display_id} - {name} TEST 260"
-    return f"Vega {entity_type} - {name} TEST 260"
+        return f"Vega {entity_type} - {display_id} - {name} TEST 297"
+    return f"Vega {entity_type} - {name} TEST 297"
 
 
 # Marks the related-alert case so close-sync does not treat it as the incident.
@@ -195,8 +195,8 @@ RELATED_ALERTS_TITLE_MARK = "(related alerts)"
 def incident_case_title(record: dict, related: bool = False, batch: int | None = None) -> str:
     """SOAR case title for the incident case or one related-alert chunk.
 
-    Titles still use ``(batch N)`` in chunks of 90. Grouping does not follow
-    the batch number; every related alert shares one identifier.
+    Related alerts use ``(batch N)`` in chunks of up to 90. ``N`` advances per
+    incident in the connector checkpoint so batch numbers are not reused.
     """
     title = case_display_name(record, ENTITY_TYPE_INCIDENT)
     if batch:
@@ -211,12 +211,14 @@ def incident_grouping_id(
 ) -> str:
     """SOAR source grouping key.
 
-    The incident case is ``Vega:incident:<id>``. Every related alert of that
-    incident shares ``Vega:incident:<id>:related``. SecOps splits that group
-    at max alerts per case. ``batch`` does not change the key.
+    The incident case is ``Vega:incident:<id>``. Related alerts use one
+    grouping key per batch chunk: ``Vega:incident:<id>:related:batch:<N>``.
+    Legacy ``related=True`` without ``batch`` keeps ``...:related``.
     """
     base = f"{VENDOR_NAME}:incident:{incident_id}"
-    if related or batch:
+    if batch:
+        return f"{base}:related:batch:{int(batch)}"
+    if related:
         return f"{base}:related"
     return base
 

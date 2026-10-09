@@ -183,7 +183,7 @@ def test_incident_related_alerts_share_one_grouping_id() -> None:
     assert soar_meta(related[0][1])["grouping_id"] == "Vega:incident:inc-1"
     assert soar_meta(related[0][1])["case_part"] == 0
     assert all(
-        soar_meta(item[1])["grouping_id"] == "Vega:incident:inc-1:related"
+        soar_meta(item[1])["grouping_id"] == "Vega:incident:inc-1:related:batch:1"
         for item in related[1:]
     )
     assert all(soar_meta(item[1])["case_part"] == 1 for item in related[1:])
@@ -489,7 +489,7 @@ def test_short_nested_alert_list_backfills_related_alerts() -> None:
     assert _ids(summary) == ["inc-1", "alert-1", "alert-2"]
     related = [item[1] for item in summary["records"] if item[0] == ENTITY_TYPE_ALERT]
     assert {soar_meta(item)["grouping_id"] for item in related} == {
-        "Vega:incident:inc-1:related"
+        "Vega:incident:inc-1:related:batch:1"
     }
     assert {soar_meta(item)["grouping_start"] for item in related} == {
         "2026-07-28T11:22:43Z"
@@ -607,17 +607,55 @@ def test_related_alerts_are_batched_by_ninety_in_one_run() -> None:
             f"alert-{index}" for index in range(1, total + 1)
         ]
         assert [soar_meta(item[1])["grouping_id"] for item in alerts] == [
-            "Vega:incident:inc-1:related",
-            "Vega:incident:inc-1:related",
-            "Vega:incident:inc-1:related",
-            "Vega:incident:inc-1:related",
-            "Vega:incident:inc-1:related",
-            "Vega:incident:inc-1:related",
+            "Vega:incident:inc-1:related:batch:1",
+            "Vega:incident:inc-1:related:batch:1",
+            "Vega:incident:inc-1:related:batch:2",
+            "Vega:incident:inc-1:related:batch:2",
+            "Vega:incident:inc-1:related:batch:3",
+            "Vega:incident:inc-1:related:batch:3",
         ]
         assert summary["checkpoint"]["related_backfill"]["settled"]["inc-1"] == total
         assert "inc-1" not in summary["checkpoint"]["related_backfill"]["open"]
     finally:
         pipeline_module.MAX_ALERTS_PER_CASE = previous_case
+
+
+def test_related_batch_numbers_continue_from_checkpoint() -> None:
+    manager = FakeManager()
+    manager.incidents = [
+        {
+            "id": "inc-1",
+            "vegaUniqueIncidentId": "INC-34",
+            "name": "Campaign",
+            "alertsCount": 3,
+            "alerts": [{"alertId": f"alert-{index}"} for index in range(1, 4)],
+        }
+    ]
+    manager.alerts = [
+        {"id": f"alert-{index}", "name": f"A{index}"} for index in range(1, 4)
+    ]
+    checkpoint = {
+        "ingested_ids": ["incident:inc-1", "alert-1", "alert-2"],
+        "related_backfill": {
+            "offset": 0,
+            "open": {},
+            "settled": {"inc-1": 2},
+            "batch_version": 5,
+            "next_related_batch": {"inc-1": 3},
+            "related_batch_filled": {"inc-1": 0},
+        },
+    }
+    summary = _pipeline(
+        manager, entities="Alerts,Incidents", has_related="Yes", max_fetch=20
+    ).run(checkpoint=checkpoint)
+    alerts = [record for kind, record in summary["records"] if kind == ENTITY_TYPE_ALERT]
+    assert len(alerts) == 1
+    meta = soar_meta(alerts[0])
+    assert meta["grouping_id"] == "Vega:incident:inc-1:related:batch:3"
+    assert meta["case_title"].endswith("(batch 3)")
+    backfill = summary["checkpoint"]["related_backfill"]
+    assert backfill["next_related_batch"]["inc-1"] == 3
+    assert backfill["related_batch_filled"]["inc-1"] == 1
 
 
 def test_missing_id_from_batch_is_fetched_on_its_own_and_packaged() -> None:
@@ -780,7 +818,7 @@ def test_truncated_related_scan_resumes_remaining_alerts() -> None:
     assert second["checkpoint"]["related_backfill"]["settled"]["inc-1"] == 4
     related = [item[1] for item in second["records"]]
     assert {soar_meta(item)["grouping_id"] for item in related} == {
-        "Vega:incident:inc-1:related"
+        "Vega:incident:inc-1:related:batch:1"
     }
 
 
@@ -826,11 +864,11 @@ def test_many_related_alerts_share_one_grouping_id() -> None:
     assert all(title.endswith("(batch 1)") for title in titles[1:])
     assert groupings == [
         "Vega:incident:inc-1",
-        "Vega:incident:inc-1:related",
-        "Vega:incident:inc-1:related",
-        "Vega:incident:inc-1:related",
-        "Vega:incident:inc-1:related",
-        "Vega:incident:inc-1:related",
+        "Vega:incident:inc-1:related:batch:1",
+        "Vega:incident:inc-1:related:batch:1",
+        "Vega:incident:inc-1:related:batch:1",
+        "Vega:incident:inc-1:related:batch:1",
+        "Vega:incident:inc-1:related:batch:1",
     ]
     assert parts == [0, 1, 1, 1, 1, 1]
     assert [record.get("id") for kind, record in records if kind == ENTITY_TYPE_INCIDENT] == [
@@ -925,7 +963,7 @@ def test_two_incidents_one_related_and_overflow() -> None:
     assert small[1][1]["id"] == "small-1"
     assert [evt["name"] for evt in small[1][1]["alert_events"]] == ["evt-small"]
     assert soar_meta(small[0][1])["grouping_id"] == "Vega:incident:inc-small"
-    assert soar_meta(small[1][1])["grouping_id"] == "Vega:incident:inc-small:related"
+    assert soar_meta(small[1][1])["grouping_id"] == "Vega:incident:inc-small:related:batch:1"
     assert [kind for kind, _ in large] == [
         ENTITY_TYPE_INCIDENT,
         ENTITY_TYPE_ALERT,
@@ -936,7 +974,7 @@ def test_two_incidents_one_related_and_overflow() -> None:
     ]
     assert [soar_meta(item[1]).get("case_part") for item in large] == [0, 1, 1, 1, 1, 1]
     assert {soar_meta(item[1])["grouping_id"] for item in large[1:]} == {
-        "Vega:incident:inc-large:related"
+        "Vega:incident:inc-large:related:batch:1"
     }
     assert [record.get("id") for kind, record in large if kind == ENTITY_TYPE_INCIDENT] == [
         "inc-large"

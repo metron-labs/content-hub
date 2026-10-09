@@ -151,6 +151,8 @@ class IngestionPipeline:
         self._replay_related = False
         self._related_scan_offset = 0
         self._related_scan_incomplete = False
+        self._next_related_batch: dict[str, int] = {}
+        self._related_batch_filled: dict[str, int] = {}
 
     def _log(self, level: str, msg: str, *args) -> None:
         safe_log(self.logger, level, msg, *args)
@@ -791,7 +793,7 @@ class IngestionPipeline:
         return set_soar_meta(
             alert,
             soar_alert_type=SOAR_ALERT_TYPE_ALERT,
-            grouping_id=incident_grouping_id(incident_id, related=True),
+            grouping_id=incident_grouping_id(incident_id, related=True, batch=batch),
             case_tags=list(case_tags or []),
             incident_label_tags=record_label_tags(incident),
             case_title=incident_case_title(incident, batch=batch),
@@ -850,13 +852,16 @@ class IngestionPipeline:
         case_tags: Optional[list[str]] = None,
         apply_case_tags: bool = False,
         events_by_id: Optional[dict[str, list]] = None,
-        batch: int = 1,
+        batch: Optional[int] = None,
     ) -> bool:
         if self._should_stop(len(records)):
             return False
         identifier = record_id(alert, ENTITY_TYPE_ALERT)
         if not identifier or identifier in ingested_set:
             return False
+        incident_id = record_id(incident, ENTITY_TYPE_INCIDENT)
+        if batch is None:
+            batch = self._consume_related_batch_slot(incident_id)
         try:
             if events_by_id is not None:
                 enriched = self._apply_prefetched_events(alert, events_by_id)
@@ -903,6 +908,26 @@ class IngestionPipeline:
                     ids.append(key)
         return ids
 
+    def _consume_related_batch_slot(self, incident_id: str) -> int:
+        """Assign the next monotonic batch number for a related alert (max 90 per batch)."""
+        if not incident_id:
+            return 1
+        case_size = max(1, int(MAX_ALERTS_PER_CASE))
+        try:
+            batch_no = max(int(self._next_related_batch.get(incident_id, 1)), 1)
+        except (TypeError, ValueError):
+            batch_no = 1
+        try:
+            filled = max(int(self._related_batch_filled.get(incident_id, 0)), 0)
+        except (TypeError, ValueError):
+            filled = 0
+        if filled >= case_size:
+            batch_no += 1
+            filled = 0
+        self._next_related_batch[incident_id] = batch_no
+        self._related_batch_filled[incident_id] = filled + 1
+        return batch_no
+
     def _emit_incident_cases(
         self,
         incident: dict,
@@ -913,9 +938,9 @@ class IngestionPipeline:
     ) -> None:
         """Incident case, then every related alert.
 
-        Every related alert shares ``Vega:incident:<id>:related``. Titles
-        still use ``(batch N)`` in chunks of 90. SecOps groups by the shared
-        identifier and splits at max alerts per case.
+        Batch numbers and ``Vega:incident:<id>:related:batch:<N>`` grouping
+        keys advance in ingest order (up to 90 alerts per batch) and persist
+        in the checkpoint so batch numbers are not reused across runs.
         """
         identifier = record_id(incident, ENTITY_TYPE_INCIDENT)
         display_id = record_display_id(incident, ENTITY_TYPE_INCIDENT)
@@ -935,37 +960,29 @@ class IngestionPipeline:
             return
         ordered = self._ordered_stubs(incident)
         case_size = max(1, int(MAX_ALERTS_PER_CASE))
-        batch_by_key: dict[str, int] = {}
-        for index, stub in enumerate(ordered):
-            batch_no = index // case_size + 1
-            for key in record_alert_ids(stub):
-                batch_by_key[key] = batch_no
         resolved_index: dict[str, dict] = {}
         for alert in related or []:
             if not isinstance(alert, dict):
                 continue
             for key in record_alert_ids(alert):
                 resolved_index.setdefault(key, alert)
-        queue: list[tuple[dict, int]] = []
+        queue: list[dict] = []
+        known: set[str] = set()
         for stub in self._pending_stubs(incident, ingested_set):
             keys = record_alert_ids(stub)
+            known.update(keys)
             full = None
             for key in keys:
                 full = resolved_index.get(key)
                 if full:
                     break
-            batch_no = batch_by_key.get(keys[0], 1) if keys else 1
-            queue.append((full or stub, batch_no))
-        known = set(batch_by_key)
-        extra_index = len(ordered)
+            queue.append(full or stub)
         for alert in related or []:
             keys = record_alert_ids(alert)
             if not keys or any(key in known or key in ingested_set for key in keys):
                 continue
-            batch_no = extra_index // case_size + 1
-            extra_index += 1
             known.update(keys)
-            queue.append((alert, batch_no))
+            queue.append(alert)
         if not ordered and not queue:
             self._log(
                 "info",
@@ -976,25 +993,26 @@ class IngestionPipeline:
             return
         already_sent = max(len(ordered) - len(self._pending_stubs(incident, ingested_set)), 0)
         to_package = len(queue)
-        first_batch = queue[0][1] if queue else 0
-        last_batch = queue[-1][1] if queue else 0
+        try:
+            next_batch = max(int(self._next_related_batch.get(identifier, 1)), 1)
+        except (TypeError, ValueError):
+            next_batch = 1
         self._log(
             "info",
             "Step 6 — %s: %s related alert(s) in batches of %s. "
             "%s already checkpointed. This run adds all %s "
-            "(batch %s through batch %s). They share one source grouping "
-            "identifier. SecOps splits that group at max alerts per case.",
+            "(starting at batch %s). Each batch uses its own source grouping "
+            "identifier.",
             label,
             len(ordered) or to_package,
             case_size,
             already_sent,
             to_package,
-            first_batch,
-            last_batch,
+            next_batch,
         )
         if not queue:
             return
-        case_tags = collect_label_tags(incident, *[alert for alert, _batch in queue])
+        case_tags = collect_label_tags(incident, *queue)
         event_batch = max(1, int(ALERT_EVENTS_ID_BATCH))
         offset = 0
         stopped_early = False
@@ -1004,13 +1022,13 @@ class IngestionPipeline:
                 stopped_early = True
                 break
             window = queue[offset : offset + event_batch]
-            pending = [alert for alert, _batch in window]
+            pending = list(window)
             remaining = self._remaining(len(records))
             if remaining is not None:
                 pending = pending[:remaining]
             events_by_id = self._fetch_events_for_alerts(pending) if pending else {}
             halt = False
-            for batch_index, (alert, batch_no) in enumerate(window):
+            for batch_index, alert in enumerate(window):
                 if self._append_related_alert(
                     alert,
                     incident,
@@ -1020,7 +1038,6 @@ class IngestionPipeline:
                     case_tags=case_tags,
                     apply_case_tags=(offset + batch_index) == 0,
                     events_by_id=events_by_id,
-                    batch=batch_no,
                 ):
                     packaged += 1
                 elif self._should_stop(len(records)):
@@ -1342,6 +1359,24 @@ class IngestionPipeline:
         # Older checkpoints marked every related id sent after one large
         # return. SecOps kept only part of that return, so send those again.
         self._replay_related = batch_version < RELATED_BATCH_VERSION
+        if self._replay_related:
+            self._next_related_batch = {}
+            self._related_batch_filled = {}
+        else:
+            next_batch: dict[str, int] = {}
+            for key, value in dict(saved.get("next_related_batch") or {}).items():
+                try:
+                    next_batch[str(key)] = max(int(value), 1)
+                except (TypeError, ValueError):
+                    continue
+            filled: dict[str, int] = {}
+            for key, value in dict(saved.get("related_batch_filled") or {}).items():
+                try:
+                    filled[str(key)] = max(int(value), 0)
+                except (TypeError, ValueError):
+                    continue
+            self._next_related_batch = next_batch
+            self._related_batch_filled = filled
         try:
             offset = int(saved.get("offset") or 0)
         except (TypeError, ValueError):
@@ -1932,6 +1967,8 @@ class IngestionPipeline:
             "settled": self._settled_related,
             "upgrade_ids": list(self._upgrade_incident_ids),
             "batch_version": RELATED_BATCH_VERSION,
+            "next_related_batch": self._next_related_batch,
+            "related_batch_filled": self._related_batch_filled,
         }
         if self._incomplete:
             # Keep the previous watermark when this cycle packaged nothing.

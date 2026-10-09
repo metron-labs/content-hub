@@ -345,8 +345,8 @@ def test_grouping_ids() -> None:
     assert incident_grouping_id("inc-1") == "Vega:incident:inc-1"
     assert incident_grouping_id("inc-1", related=False) == "Vega:incident:inc-1"
     assert incident_grouping_id("inc-1", related=True) == "Vega:incident:inc-1:related"
-    assert incident_grouping_id("inc-1", batch=1) == "Vega:incident:inc-1:related"
-    assert incident_grouping_id("inc-1", batch=2) == "Vega:incident:inc-1:related"
+    assert incident_grouping_id("inc-1", batch=1) == "Vega:incident:inc-1:related:batch:1"
+    assert incident_grouping_id("inc-1", batch=2) == "Vega:incident:inc-1:related:batch:2"
     assert incident_case_title({"name": "Campaign"}, batch=2).endswith("(batch 2)")
     assert alert_grouping_id("a-1") == "Vega:alert:a-1"
     assert is_graphql_alert_id("019e1b27-5119-7822-bde3-344b13e481cf")
