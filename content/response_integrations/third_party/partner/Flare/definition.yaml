@@ -1,0 +1,24 @@
+identifier: Flare
+name: Flare
+parameters:
+-   name: Flare API Key
+    default_value: ''
+    type: password
+    description: API key from the Flare platform.
+    is_mandatory: true
+    integration_identifier: Flare
+-   name: Flare Tenant ID
+    default_value: ''
+    type: string
+    description: Flare tenant ID(s). Enter one ID, or multiple comma-separated IDs
+        (e.g. 123,456) to use all of them.
+    is_mandatory: true
+    integration_identifier: Flare
+documentation_link: https://flare.io/
+categories:
+- SOAR
+- Security
+- Threat Intelligence
+svg_logo_path: resources/logo.svg
+image_path: resources/image.png
+is_available_for_community: false

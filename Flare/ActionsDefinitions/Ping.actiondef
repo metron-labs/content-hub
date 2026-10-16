@@ -1,0 +1,35 @@
+{
+  "Creator": "Admin",
+  "Name": "Ping",
+  "Description": "Test connectivity to the Flare API.",
+  "Script": "from SiemplifyAction import SiemplifyAction\nfrom SiemplifyUtils import output_handler\nfrom ScriptResult import EXECUTION_STATE_COMPLETED, EXECUTION_STATE_FAILED\n\nfrom constants import DEFAULT_FLARE_API_URL, INTEGRATION_NAME, PING_SCRIPT_NAME\nfrom FlareManager import FlareManager\nfrom utils import format_user_facing_error, parse_tenant_ids\n\n\n@output_handler\ndef main():\n    \"\"\"Connectivity test for the Flare API (supports multiple tenant IDs).\"\"\"\n    siemplify = SiemplifyAction()\n    siemplify.script_name = PING_SCRIPT_NAME\n\n    flare_api_key = siemplify.extract_configuration_param(\n        INTEGRATION_NAME, \"Flare API Key\"\n    )\n    flare_tenant_id = siemplify.extract_configuration_param(\n        INTEGRATION_NAME, \"Flare Tenant ID\"\n    )\n\n    if not flare_api_key:\n        siemplify.end(\n            \"Flare API Key is required. Enter your API key and try again.\",\n            False,\n            EXECUTION_STATE_FAILED,\n        )\n        return\n\n    status = EXECUTION_STATE_COMPLETED\n    result_value = True\n\n    try:\n        tenant_ids = parse_tenant_ids(flare_tenant_id)\n        for tenant_id in tenant_ids:\n            flare = FlareManager(\n                api_key=flare_api_key,\n                tenant_id=tenant_id,\n                api_url=DEFAULT_FLARE_API_URL,\n                logger_instance=siemplify.LOGGER,\n            )\n            flare.test_connection()\n        tenants_label = \", \".join(str(t) for t in tenant_ids)\n        output_message = (\n            f\"Successfully connected to the {INTEGRATION_NAME} server \"\n            f\"for tenant ID(s): {tenants_label}!\"\n        )\n    except Exception as error:\n        result_value = False\n        status = EXECUTION_STATE_FAILED\n        friendly = format_user_facing_error(error)\n        output_message = (\n            f\"Failed to connect to the {INTEGRATION_NAME} server! Error: {friendly}\"\n        )\n        siemplify.LOGGER.error(output_message)\n\n    siemplify.LOGGER.info(f\"Status: {status}\")\n    siemplify.LOGGER.info(f\"Result Value: {result_value}\")\n    siemplify.LOGGER.info(f\"Output Message: {output_message}\")\n    siemplify.end(output_message, result_value, status)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+  "IntegrationIdentifier": "Flare",
+  "ScriptResultName": "ScriptResult",
+  "DynamicResultsMetadata": [
+    {
+      "ResultName": "JsonResult",
+      "ResultExample": "{}",
+      "ShowResult": true
+    }
+  ],
+  "IsEnabled": true,
+  "IsCustom": true,
+  "AiGenerated": false,
+  "IsSystem": false,
+  "Version": 1.0,
+  "TimeoutSeconds": 600,
+  "IsAsync": false,
+  "AsyncPollingIntervalInSeconds": 3600,
+  "TotalIntervalTimeoutForAsyncInSeconds": 86400,
+  "Parameters": [],
+  "DefaultResultValue": "",
+  "PythonVersion": "None",
+  "ActionType": 1,
+  "SimulationData": {
+    "Entities": null
+  },
+  "SimulationDataJson": null,
+  "AICategories": [],
+  "AIDescription": null,
+  "EntityTypes": []
+}

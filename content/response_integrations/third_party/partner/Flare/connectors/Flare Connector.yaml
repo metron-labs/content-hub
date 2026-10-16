@@ -1,0 +1,90 @@
+name: Flare Connector
+parameters:
+-   name: Flare API Key
+    default_value: ''
+    type: password
+    description: Flare API key
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Flare Tenant ID
+    default_value: ''
+    type: string
+    description: Flare tenant ID(s). One ID, or multiple comma-separated IDs (e.g.
+        123,456) to fetch from each tenant.
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Severity Filter
+    default_value: ''
+    type: string
+    description: Optional Flare severities (comma-separated or multi-select). Case-insensitive.
+        Empty = all severities from Flare /events/filters/severities. Invalid values
+        fail the connector test/logs.
+    is_mandatory: false
+    is_advanced: false
+    mode: script
+-   name: Source Types Filter
+    default_value: ''
+    type: string
+    description: Enter a category or sub-type name (e.g., Open Web or Pastes). Selecting
+        a main category automatically includes all of its sub-types. Inputs are not
+        case-sensitive. Empty = all types from Flare. Invalid values fail the connector
+        test/logs.
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: Ingest Full Event
+    default_value: 'true'
+    type: boolean
+    description: Enrich each finding with full Flare event detail.
+    is_mandatory: false
+    is_advanced: true
+    mode: script
+-   name: Backfill Range (Days)
+    default_value: '0'
+    type: string
+    description: Days to backfill on the first run only (allowed 0-180; 0 starts from
+        now). Window starts at 12:00 AM IST. After the first run, changing Backfill
+        Range, Severity, or Source Types does not re-fetch history — ingestion continues
+        from the saved checkpoint watermark.
+    is_mandatory: true
+    is_advanced: false
+    mode: script
+-   name: Auto Remediate
+    default_value: 'false'
+    type: boolean
+    description: After ingest, remediate Flare events for closed SOAR Flare cases.
+    is_mandatory: false
+    is_advanced: false
+    mode: script
+-   name: DeviceProductField
+    default_value: Flare
+    type: string
+    description: Platform Product Field Name (required by SecOps). Maps to event device_product
+        / PRODUCT_NAME.
+    is_mandatory: true
+    is_advanced: false
+    mode: regular
+-   name: EventClassId
+    default_value: flare_uid
+    type: string
+    description: Platform Event Field Name (required by SecOps). Field used for event
+        class / mapping (flare_uid).
+    is_mandatory: true
+    is_advanced: false
+    mode: regular
+-   name: PythonProcessTimeout
+    default_value: '930'
+    type: string
+    description: Platform Python process timeout in seconds (required by SecOps).
+    is_mandatory: true
+    is_advanced: false
+    mode: regular
+description: 'Flare Connector: poll Flare findings into SOAR alerts. Optional Auto
+    Remediate syncs closed SOAR Flare cases using a timestamp checkpoint.'
+integration: Flare
+documentation_link: null
+rules: []
+is_connector_rules_supported: false
+creator: Admin
