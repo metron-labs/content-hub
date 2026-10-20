@@ -1,0 +1,32 @@
+# Common Flare search fields that match SecOps entities.
+# identifiers[].name is copied onto the event as DestinationHostName.
+# metadata.flare_url is already on the event as flare_url.
+# highlights, tenant_metadata, and the full finding JSON are not mapped.
+-   extract_function: none
+    extract_function_param: ''
+    is_artifact: false
+    product: Flare
+    raw_data_primary_field_comparison_type: equal
+    raw_data_primary_field_match_term: DestinationHostName
+    raw_data_secondary_field_comparison_type: equal
+    raw_data_secondary_field_match_term: null
+    raw_data_third_field_comparison_type: equal
+    raw_data_third_field_match_term: null
+    security_event_file_name: DestinationHostName
+    source: Flare
+    transformation_function: to_string
+    transformation_function_param: null
+-   extract_function: none
+    extract_function_param: ''
+    is_artifact: false
+    product: Flare
+    raw_data_primary_field_comparison_type: equal
+    raw_data_primary_field_match_term: flare_url
+    raw_data_secondary_field_comparison_type: equal
+    raw_data_secondary_field_match_term: null
+    raw_data_third_field_comparison_type: equal
+    raw_data_third_field_match_term: null
+    security_event_file_name: DestinationURL
+    source: Flare
+    transformation_function: to_string
+    transformation_function_param: null

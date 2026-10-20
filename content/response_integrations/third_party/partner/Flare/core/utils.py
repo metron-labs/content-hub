@@ -128,6 +128,8 @@ def format_user_facing_error(exc: BaseException) -> str:
         return MSG_UNAUTHORIZED
     if "forbidden" in lower:
         return MSG_FORBIDDEN
+    if "429" in lower or "ratelimit" in lower or "rate limit" in lower:
+        return MSG_RATE_LIMIT
     if "timeout" in lower or "timed out" in lower:
         return "Connection to Flare timed out. Check network access and try again."
     if any(

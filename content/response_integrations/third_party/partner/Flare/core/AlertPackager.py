@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 from soar_sdk.SiemplifyUtils import unix_now
 
@@ -115,6 +117,65 @@ def _unix_timestamp(event: dict, fallback_time: int) -> int:
             return fallback_time
 
 
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _identifiers(event: dict) -> list:
+    """Flare puts identifiers on the event, or under data after enrichment."""
+    for container in (event, _data(event), _metadata(event)):
+        raw = container.get("identifiers")
+        if isinstance(raw, list) and raw:
+            return raw
+    return []
+
+
+def _looks_like_host(value: str) -> bool:
+    text = value.strip()
+    if not text or " " in text or "@" in text:
+        return False
+    if _IPV4_RE.match(text):
+        return False
+    if text.startswith(("http://", "https://")):
+        return True
+    return "." in text
+
+
+def _host_from_value(value: str) -> str:
+    text = str(value).strip()
+    if text.startswith(("http://", "https://")):
+        return (urlparse(text).hostname or "").strip()[:255]
+    return text[:255]
+
+
+def _destination_host(event: dict) -> str:
+    """Hostname SecOps uses for the Product=Flare DestinationHostName rule.
+
+    Case membership stays in the Alert Grouping setting. This only supplies
+    the entity that setting matches.
+    """
+    data = _data(event)
+    for key in ("hostname", "domain", "host"):
+        raw = data.get(key)
+        if raw and _looks_like_host(str(raw)):
+            host = _host_from_value(str(raw))
+            if host and _looks_like_host(host):
+                return host
+
+    victim = _as_dict(data.get("victim_information"))
+    if victim.get("domain") and _looks_like_host(str(victim["domain"])):
+        host = _host_from_value(str(victim["domain"]))
+        if host and _looks_like_host(host):
+            return host
+
+    for ident in _identifiers(event):
+        if not isinstance(ident, dict) or not ident.get("name"):
+            continue
+        host = _host_from_value(str(ident["name"]))
+        if host and _looks_like_host(host):
+            return host
+    return ""
+
+
 def _safe_json(value: Any) -> str:
     try:
         return json.dumps(value, default=str)
@@ -128,7 +189,7 @@ def build_event_dict(event: dict, start_time: int, end_time: int) -> dict:
     uid = _uid(event)
     source_type = _source_type(event)
     severity = _severity(event)
-    return {
+    payload = {
         "StartTime": start_time,
         "EndTime": end_time,
         "name": _title(event),
@@ -150,6 +211,11 @@ def build_event_dict(event: dict, start_time: int, end_time: int) -> dict:
         "tenant_id": str(meta.get("tenant_id") or ""),
         "details": _safe_json(event),
     }
+    host = _destination_host(event)
+    if host:
+        # Alert Grouping (Product Flare, Group By Entities) matches this field.
+        payload["DestinationHostName"] = host
+    return payload
 
 
 def create_alerts(
@@ -197,8 +263,11 @@ def create_alerts(
         alert.rule_generator = VENDOR_NAME
         alert.device_event_class_id = alert_id
         alert.name = _title(event)
-        alert.source_grouping_identifier = source_type
-        alert.sourceGroupIdentifier = source_type
+        # Grouping key is the monitored hostname from identifiers[].name.
+        # Source type remains on the event as source_type when no host exists.
+        grouping_key = _destination_host(event) or source_type
+        alert.source_grouping_identifier = grouping_key
+        alert.sourceGroupIdentifier = grouping_key
         alert.start_time = event_time
         alert.end_time = event_time
         alert.priority = SEVERITY_TO_ALERT_PRIORITY.get(severity, 40)

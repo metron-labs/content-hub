@@ -80,6 +80,14 @@ NOT_FOUND = 404
 TOO_MANY_REQUESTS = 429
 SERVER_ERROR = 500
 
+# https://api.docs.flare.io/concepts/rate-limits-and-quotas
+# Limits are per organization. Search and basic are independent buckets.
+FLARE_BASIC_REQUESTS_PER_SECOND = 4
+FLARE_SEARCH_REQUESTS_PER_SECOND = 1
+# Flare: on HTTP 429, wait 10 seconds before retrying.
+FLARE_RATE_LIMIT_RETRY_WAIT_SECONDS = 10
+FLARE_HTTP_RETRIES = 5
+
 # Operator-facing Flare HTTP messages (shared by manager + utils).
 MSG_BAD_REQUEST = (
     "Invalid request to Flare. Check the connector filters and try again."
@@ -94,7 +102,9 @@ MSG_FORBIDDEN = (
 MSG_NOT_FOUND = (
     "Requested Flare resource was not found. Verify the tenant ID and filters."
 )
-MSG_RATE_LIMIT = "Flare rate limit reached. Wait a moment and try again."
+MSG_RATE_LIMIT = (
+    "Flare rate limit reached after retries. The next connector run will try again."
+)
 MSG_SERVER_ERROR = (
     "Flare service is temporarily unavailable. Please try again later."
 )

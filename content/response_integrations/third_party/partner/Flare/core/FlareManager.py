@@ -2,12 +2,15 @@
 Flare API manager for the Flare - Google SecOps integration.
 
 Uses the official flareio SDK (FlareApiClient) which handles JWT generation
-and auto-refresh. Adds session-level retries for 429/5xx and explicit 401
-token refresh + retry for mutating calls.
+and auto-refresh. Paces calls to Flare's per-organization limits (basic 4/s,
+search 1/s) and retries HTTP 429 after the 10 seconds Flare recommends.
+Also retries 5xx and refreshes the token once on HTTP 401.
 """
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import urllib.parse
 from typing import Optional
 
@@ -26,6 +29,10 @@ from .constants import (
     ENDPOINT_FILTER_SEVERITIES,
     ENDPOINT_FILTER_TYPES,
     ENDPOINT_TENANTS,
+    FLARE_BASIC_REQUESTS_PER_SECOND,
+    FLARE_HTTP_RETRIES,
+    FLARE_RATE_LIMIT_RETRY_WAIT_SECONDS,
+    FLARE_SEARCH_REQUESTS_PER_SECOND,
     FORBIDDEN,
     MAX_FLARE_PAGE_SIZE,
     MSG_BAD_REQUEST,
@@ -59,24 +66,111 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+# One pair of buckets per API key. Limits are per organization, and a connector
+# run builds a new FlareManager for each tenant on the same key.
+_ORG_LIMITERS: dict[str, tuple["_RequestPace", "_RequestPace"]] = {}
+_ORG_LIMITERS_LOCK = threading.Lock()
+
+
+class _RequestPace:
+    """Space calls so a bucket stays at or under its requests-per-second cap."""
+
+    def __init__(self, requests_per_second: float) -> None:
+        self._interval = 1.0 / requests_per_second
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            delay = self._next - now
+            if delay > 0:
+                time.sleep(delay)
+                now = time.monotonic()
+            self._next = now + self._interval
+
+
+class _FlareRetry(Retry):
+    """Retry 429 only after Flare's recommended 10 second wait."""
+
+    def sleep(self, response=None):
+        status = getattr(response, "status", None)
+        if status == TOO_MANY_REQUESTS:
+            wait = float(FLARE_RATE_LIMIT_RETRY_WAIT_SECONDS)
+            headers = getattr(response, "headers", None)
+            header = headers.get("Retry-After") if headers is not None else None
+            if header:
+                try:
+                    parsed = self.parse_retry_after(header)
+                except Exception:
+                    parsed = None
+                if parsed is not None:
+                    wait = max(wait, float(parsed))
+            logger.warning(
+                "Flare rate limit reached (HTTP 429). Waiting %.0f seconds before retry.",
+                wait,
+            )
+            time.sleep(wait)
+            return
+        super().sleep(response)
+
+
+def _is_search_url(url: str) -> bool:
+    path = urllib.parse.urlsplit(url or "").path.lower()
+    return "/_search" in path
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "ratelimit" in text or "rate limit" in text
+
+
+def _limiters_for(api_key: str) -> tuple[_RequestPace, _RequestPace]:
+    with _ORG_LIMITERS_LOCK:
+        existing = _ORG_LIMITERS.get(api_key)
+        if existing is None:
+            existing = (
+                _RequestPace(FLARE_BASIC_REQUESTS_PER_SECOND),
+                _RequestPace(FLARE_SEARCH_REQUESTS_PER_SECOND),
+            )
+            _ORG_LIMITERS[api_key] = existing
+        return existing
+
 
 class _TimeoutHTTPAdapter(HTTPAdapter):
-    """HTTPAdapter that applies a default timeout when callers omit one."""
+    """HTTPAdapter that paces Flare calls and applies a default timeout."""
 
-    def __init__(self, *args, timeout=DEFAULT_HTTP_TIMEOUT, **kwargs):
+    def __init__(
+        self,
+        *args,
+        timeout=DEFAULT_HTTP_TIMEOUT,
+        basic_pace: Optional[_RequestPace] = None,
+        search_pace: Optional[_RequestPace] = None,
+        **kwargs,
+    ):
         self._default_timeout = timeout
+        self._basic_pace = basic_pace
+        self._search_pace = search_pace
         super().__init__(*args, **kwargs)
 
     def send(self, request, **kwargs):
+        pace = (
+            self._search_pace
+            if _is_search_url(getattr(request, "url", ""))
+            else self._basic_pace
+        )
+        if pace is not None:
+            pace.wait()
         kwargs.setdefault("timeout", self._default_timeout)
         return super().send(request, **kwargs)
 
 
-def _build_session(ssl_verify: bool = True) -> requests.Session:
+def _build_session(api_key: str, ssl_verify: bool = True) -> requests.Session:
     session = requests.Session()
     session.verify = ssl_verify
-    retry = Retry(
-        total=5,
+    basic_pace, search_pace = _limiters_for(api_key)
+    retry = _FlareRetry(
+        total=FLARE_HTTP_RETRIES,
         backoff_factor=2,
         status_forcelist=[
             TOO_MANY_REQUESTS,
@@ -90,7 +184,10 @@ def _build_session(ssl_verify: bool = True) -> requests.Session:
     if hasattr(retry, "backoff_max"):
         retry.backoff_max = 60  # type: ignore[attr-defined]
     adapter = _TimeoutHTTPAdapter(
-        max_retries=retry, timeout=DEFAULT_HTTP_TIMEOUT
+        max_retries=retry,
+        timeout=DEFAULT_HTTP_TIMEOUT,
+        basic_pace=basic_pace,
+        search_pace=search_pace,
     )
     session.mount("https://", adapter)
     session.mount("http://", adapter)
@@ -113,7 +210,7 @@ class FlareManager:
         self.tenant_id = int(tenant_id or 0)
         self.api_url = (api_url or DEFAULT_FLARE_API_URL).rstrip("/")
         self.logger = logger_instance or logger
-        self._session = _build_session(ssl_verify=True)
+        self._session = _build_session(self.api_key, ssl_verify=True)
         # tenant_id scopes Firework API calls to the selected Flare tenant.
         self.client = FlareApiClient(
             api_key=self.api_key,
@@ -149,13 +246,27 @@ class FlareManager:
     def _request_with_auth_retry(self, method: str, path: str, **kwargs):
         """Execute SDK request; on 401 refresh token and retry once."""
         fn = getattr(self.client, method.lower())
-        resp = fn(path, **kwargs)
+        try:
+            resp = fn(path, **kwargs)
+        except Exception as exc:
+            if _is_rate_limit_error(exc):
+                raise FlareRateLimitException(MSG_RATE_LIMIT) from exc
+            raise
         if resp.status_code == UNAUTHORIZED:
             try:
                 self._refresh_token()
+            except FlareException:
+                raise
             except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    raise FlareRateLimitException(MSG_RATE_LIMIT) from exc
                 raise FlareUnauthorizedException(MSG_UNAUTHORIZED) from exc
-            resp = fn(path, **kwargs)
+            try:
+                resp = fn(path, **kwargs)
+            except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    raise FlareRateLimitException(MSG_RATE_LIMIT) from exc
+                raise
         return resp
 
     # --- Discovery ---
@@ -420,6 +531,8 @@ class FlareManager:
         except FlareException:
             raise
         except Exception as exc:
+            if _is_rate_limit_error(exc):
+                raise FlareRateLimitException(MSG_RATE_LIMIT) from exc
             raise FlareUnauthorizedException(MSG_UNAUTHORIZED) from exc
 
         # 2) Bind the configured tenant and confirm it is accessible.
@@ -440,6 +553,8 @@ class FlareManager:
             except FlareException:
                 raise
             except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    raise FlareRateLimitException(MSG_RATE_LIMIT) from exc
                 raise tenant_error from exc
         else:
             try:
@@ -447,5 +562,7 @@ class FlareManager:
             except FlareException:
                 raise
             except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    raise FlareRateLimitException(MSG_RATE_LIMIT) from exc
                 raise FlareUnauthorizedException(MSG_UNAUTHORIZED) from exc
         return True
