@@ -222,7 +222,8 @@ class IngestionPipeline:
 
             if not items:
                 state["last_next_token"] = ""
-                state["last_processed_timestamp"] = running_watermark
+                if total_fetched and running_watermark:
+                    state["last_processed_timestamp"] = running_watermark
                 break
 
             if self.max_events is not None:
@@ -234,15 +235,23 @@ class IngestionPipeline:
             findings.extend(self._prepare_events(items))
             total_fetched += len(items)
 
+            # Newest matched_at on this page (search order is ascending).
             page_max_ts = max_event_timestamp(items)
             if page_max_ts:
+                page_max_ts = format_flare_timestamp(page_max_ts) or page_max_ts
                 page_dt = parse_iso_timestamp(page_max_ts)
                 running_dt = parse_iso_timestamp(running_watermark)
                 if page_dt and (running_dt is None or page_dt > running_dt):
                     running_watermark = page_max_ts
 
             state["last_next_token"] = from_token or ""
-            state["last_processed_timestamp"] = running_watermark
+            if running_watermark and total_fetched:
+                state["last_processed_timestamp"] = running_watermark
+                self._log(
+                    "info",
+                    "Checkpoint watermark set to last event matched_at=%s.",
+                    running_watermark,
+                )
             state["initial_backfill_start"] = initial_backfill_start
 
             if self.max_events is not None and total_fetched >= self.max_events:

@@ -198,11 +198,21 @@ def parse_iso_timestamp(value: Optional[str]) -> Optional[datetime]:
 
 
 def format_flare_timestamp(value: Optional[str]) -> Optional[str]:
-    """Normalize UI/checkpoint timestamps to Flare-friendly ISO-8601 UTC."""
+    """Normalize UI/checkpoint timestamps to Flare-friendly ISO-8601 UTC.
+
+    Fractional seconds are kept. The ingestion watermark is a Flare
+    matched_at value, and trimming it would move the next search window.
+    """
     parsed = parse_iso_timestamp(value)
     if parsed is None:
         return value.strip() if isinstance(value, str) and value.strip() else None
-    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    parsed = parsed.astimezone(timezone.utc)
+    if parsed.microsecond:
+        return (
+            parsed.strftime("%Y-%m-%dT%H:%M:%S.")
+            + f"{parsed.microsecond:06d}Z"
+        )
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def validate_backfill_range_days(val: Any) -> int:
@@ -583,16 +593,16 @@ def resolve_selected_filters(
 
 
 def extract_event_timestamp(event: dict) -> str:
-    """Prefer estimated_created_at — matches Flare _search filter watermark."""
+    """matched_at is the checkpoint and the _search filter. Fall back only if missing."""
     meta = event.get("metadata") or {}
     tenant_meta = event.get("tenant_metadata") or {}
     for obj in (meta, tenant_meta, event):
         if not isinstance(obj, dict):
             continue
-        for key in ("estimated_created_at", "matched_at", "created_at"):
+        for key in ("matched_at", "estimated_created_at", "created_at"):
             val = obj.get(key)
             if val:
-                return val
+                return str(val)
     return ""
 
 

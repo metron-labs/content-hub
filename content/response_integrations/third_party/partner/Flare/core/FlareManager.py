@@ -385,7 +385,7 @@ class FlareManager:
         severities: Optional[list] = None,
         source_types: Optional[list] = None,
         start_date: Optional[str] = None,
-        start_date_op: str = "gte",
+        start_date_op: str = "gt",
     ) -> dict:
         page_size = cap_page_size(size, MAX_FLARE_PAGE_SIZE)
         search_body: dict = {"size": page_size, "order": "asc"}
@@ -393,8 +393,9 @@ class FlareManager:
             search_body["from"] = from_token
 
         filters: dict = {}
+        # start_date is the previous run's last event matched_at, not "now".
         if start_date:
-            filters["estimated_created_at"] = {start_date_op: start_date}
+            filters["matched_at"] = {start_date_op: start_date}
         if severities:
             filters["severity"] = severities
         if source_types:
