@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "678",
+      "name": "Critical credential leaks",
+      "severity": [
+        "critical"
+      ]
+    }
+  ],
+  "count": 1
+}

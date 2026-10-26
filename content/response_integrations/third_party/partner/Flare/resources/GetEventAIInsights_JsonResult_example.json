@@ -1,0 +1,7 @@
+{
+  "summary": "Credentials for a corporate account were exposed in a stealer log.",
+  "recommendations": [
+    "Reset the password",
+    "Revoke active sessions"
+  ]
+}

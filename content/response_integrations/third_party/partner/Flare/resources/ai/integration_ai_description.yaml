@@ -1,9 +1,9 @@
 product_categories:
-    reasoning: ''
+    reasoning: 'Flare is a threat intelligence and exposure-management platform. The integration ingests Flare events and provides SOAR actions to investigate events, search global data, and look up identifiers, alert rules, and threat entities.'
     siem: false
     edr: false
     network_security: false
-    threat_intelligence: false
+    threat_intelligence: true
     email_security: false
     iam_and_identity_management: false
     cloud_security: false

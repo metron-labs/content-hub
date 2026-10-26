@@ -1,0 +1,5 @@
+{
+  "uid": "example-event-uid",
+  "field_path": "data.credentials",
+  "value": []
+}

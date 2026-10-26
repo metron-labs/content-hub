@@ -1,0 +1,21 @@
+name: Get Alert Details
+description: "Retrieve the configuration, filters and notification settings of a Flare alert rule."
+integration_identifier: Flare
+parameters:
+-   name: Alert ID
+    default_value: ""
+    type: string
+    description: "ID of the Flare alert rule."
+    is_mandatory: true
+-   name: Tenant ID
+    default_value: ""
+    type: string
+    description: "Optional. Required only when the integration is configured with several tenant IDs; must be one of the configured IDs."
+    is_mandatory: false
+dynamic_results_metadata:
+-   result_example_path: resources/GetAlertDetails_JsonResult_example.json
+    result_name: JsonResult
+    show_result: true
+default_result_value: ''
+creator: Admin
+script_result_name: is_success

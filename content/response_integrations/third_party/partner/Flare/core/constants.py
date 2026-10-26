@@ -10,6 +10,21 @@ VENDOR_NAME = "Flare"
 
 # Action script names
 PING_SCRIPT_NAME = f"{INTEGRATION_NAME} - Ping"
+GET_EVENT_DETAILS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Event Details"
+GET_EVENT_FIELD_DETAILS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Event Field Details"
+GET_EVENT_AI_INSIGHTS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Event AI Insights"
+EXECUTE_EVENT_ACTION_SCRIPT_NAME = f"{INTEGRATION_NAME} - Execute Event Action"
+EXPLAIN_IDENTIFIER_MATCH_SCRIPT_NAME = f"{INTEGRATION_NAME} - Explain Identifier Match"
+SEARCH_GLOBAL_DATA_SCRIPT_NAME = f"{INTEGRATION_NAME} - Search Global Data"
+GET_GLOBAL_SEARCH_QUOTA_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Global Search Quota"
+LIST_IDENTIFIERS_SCRIPT_NAME = f"{INTEGRATION_NAME} - List Identifiers"
+GET_IDENTIFIER_DETAILS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Identifier Details"
+SET_IDENTIFIER_STATUS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Set Identifier Status"
+LIST_ALERTS_SCRIPT_NAME = f"{INTEGRATION_NAME} - List Alerts"
+GET_ALERT_DETAILS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Alert Details"
+LIST_ALERT_CHANNELS_SCRIPT_NAME = f"{INTEGRATION_NAME} - List Alert Channels"
+LIST_ENTITIES_SCRIPT_NAME = f"{INTEGRATION_NAME} - List Entities"
+GET_ENTITY_DETAILS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Entity Details"
 
 # Connector
 THREAT_FINDINGS_CONNECTOR_NAME = "Flare Connector"
@@ -23,6 +38,26 @@ ENDPOINT_EVENT_ACTIONS = "/firework/v4/events/actions"
 ENDPOINT_FILTER_SEVERITIES = "/firework/v4/events/filters/severities"
 ENDPOINT_FILTER_TYPES = "/firework/v4/events/filters/types"
 ENDPOINT_TENANTS = "/firework/v2/me/tenants"
+# Paths below follow the "Target Endpoint" column of the Flare Actions API list
+# verbatim. Verify them against https://api.docs.flare.io before release;
+# they are centralised here so a correction is a one-line change.
+ENDPOINT_EVENTS_EXPAND = "/events/v2/expand"
+ENDPOINT_EVENTS_AI_ASSISTANCE = "/events/ai-assistance"
+ENDPOINT_EVENTS_EXPLAIN_IDENTIFIER = "/events/explain-identifier"
+ENDPOINT_GLOBAL_SEARCH = "/global/_search"
+ENDPOINT_GLOBAL_SEARCH_QUOTA = "/global/_search/quota"
+ENDPOINT_IDENTIFIERS = "/firework/v4/identifiers/"
+ENDPOINT_ALERTS = "/firework/v4/alerts/"
+ENDPOINT_ALERT_CHANNELS = "/firework/v4/alerts/channels"
+ENDPOINT_ENTITIES_LIST = "/entities/_list"
+ENDPOINT_ENTITIES = "/entities/"
+
+# Action inputs
+EVENT_ACTION_TYPES = ("remediate", "ignore", "unignore")
+MAX_EVENT_ACTION_TARGETS = 10
+DEFAULT_MAX_RECORDS = 50
+HARD_MAX_RECORDS = 1000
+OFFSET_PAGE_SIZE = 100
 
 DEFAULT_FLARE_API_URL = "https://api.flare.io"
 DEFAULT_FLARE_APP_URL = "https://app.flare.io"
@@ -36,7 +71,7 @@ DEFAULT_SDK_HTTP_TIMEOUT = (10, 60)
 MAX_BACKFILL_RANGE_DAYS = 180
 MAX_FLARE_PAGE_SIZE = 10
 # Package / integration release version (keep defs in sync).
-INTEGRATION_VERSION = 1.0
+INTEGRATION_VERSION = 2.0
 SEVERITY_OPTIONS = ("info", "low", "medium", "high", "critical")
 SEVERITY_TO_ALERT_PRIORITY = {
     "critical": 100,

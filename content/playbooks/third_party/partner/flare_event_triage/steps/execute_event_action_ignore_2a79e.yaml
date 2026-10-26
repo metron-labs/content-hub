@@ -1,0 +1,84 @@
+name: Flare_Execute Event Action
+description: Ignore the Flare event when its severity is below high. This changes the event state in Flare.
+identifier: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+original_step_id: eaa3d34b-e25c-5e24-b02c-67f21f004dc2
+playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+parent_step_ids:
+- 226e97ef-30c7-5da6-9c45-ef30acd64179
+parent_step_id: 226e97ef-30c7-5da6-9c45-ef30acd64179
+instance_name: Ignore Event
+is_automatic: true
+is_skippable: false
+action_provider: Scripts
+start_loop_step_id: null
+parameters:
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: AssignedUsers
+    value: null
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: AsyncActionTimeout
+    value: '86400'
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: AsyncPollingInterval
+    value: '3600'
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: DynamicInjectionInstancePlaceholder
+    value: ''
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: FallbackIntegrationInstance
+    value: null
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: FetchInstanceByName
+    value: 'false'
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: HasApprovalLink
+    value: null
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: IntegrationInstance
+    value: AutomaticEnvironment
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: MessageToAssignee
+    value: null
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: PendingActionTimeout
+    value: null
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: RetryConfiguration
+    value: '{"Enabled":false,"IntervalInSeconds":30,"NumberOfRetries":1}'
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: ScriptName
+    value: Flare_Execute Event Action
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: ScriptParametersEntityFields
+    value: '{"Action Type":"ignore","Event UIDs":"[Event.flare_uid]","Tenant ID":""}'
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: SelectedScopeName
+    value: All entities
+-   step_id: 2a79e75b-6279-537a-9ac9-4dc965d6996a
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: UseEntitiesLoopScope
+    value: null
+action_name: Flare_Execute Event Action
+parallel_actions: []
+integration: Flare
+parent_container_id: null
+is_touched_by_ai: false
+is_debug_mock_data: false
+step_debug_data: null
+auto_skip_on_failure: false
+previous_result_condition: '{"226e97ef-30c7-5da6-9c45-ef30acd64179": "2"}'
+type: action

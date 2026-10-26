@@ -1,0 +1,8 @@
+{
+  "id": "e-1",
+  "type": "threat_actor",
+  "name": "Actor X",
+  "aliases": [
+    "X"
+  ]
+}

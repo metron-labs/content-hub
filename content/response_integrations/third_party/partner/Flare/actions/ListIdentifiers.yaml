@@ -1,0 +1,31 @@
+name: List Identifiers
+description: "List the identifiers (monitored domains, keywords, identities, IPs, BINs) with optional filtering."
+integration_identifier: Flare
+parameters:
+-   name: Type
+    default_value: ""
+    type: string
+    description: "Optional identifier type filter."
+    is_mandatory: false
+-   name: Status
+    default_value: ""
+    type: string
+    description: "Optional identifier status filter."
+    is_mandatory: false
+-   name: Max Records To Return
+    default_value: "50"
+    type: string
+    description: "Maximum number of identifiers to return (1-1000). Default: 50."
+    is_mandatory: false
+-   name: Tenant ID
+    default_value: ""
+    type: string
+    description: "Optional. Required only when the integration is configured with several tenant IDs; must be one of the configured IDs."
+    is_mandatory: false
+dynamic_results_metadata:
+-   result_example_path: resources/ListIdentifiers_JsonResult_example.json
+    result_name: JsonResult
+    show_result: true
+default_result_value: ''
+creator: Admin
+script_result_name: is_success

@@ -1,0 +1,13 @@
+identifier: c3d91f08-2a74-4e5b-8c16-7b0a4d2e9f55
+is_enabled: true
+playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+type_: product_name
+conditions:
+-   field_name: ''
+    value: Flare
+    match_type: equal
+    custom_operator_name: null
+logical_operator: and
+environments:
+- '*'
+playbook_name: null

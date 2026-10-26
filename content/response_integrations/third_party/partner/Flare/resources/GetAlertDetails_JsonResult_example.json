@@ -1,0 +1,10 @@
+{
+  "id": "678",
+  "name": "Critical credential leaks",
+  "channels": [
+    {
+      "id": "9",
+      "type": "email"
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+name: Flare_Explain Identifier Match
+description: Explain why the event matched the first monitored identifier returned by Get Event Details.
+identifier: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+original_step_id: 2addfd79-06ff-553c-b533-85b941b8c377
+playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+parent_step_ids:
+- d06b9465-a6d5-515f-bbd8-3d6de9f571af
+parent_step_id: d06b9465-a6d5-515f-bbd8-3d6de9f571af
+instance_name: Explain Identifier Match
+is_automatic: true
+is_skippable: false
+action_provider: Scripts
+start_loop_step_id: null
+parameters:
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: AssignedUsers
+    value: null
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: AsyncActionTimeout
+    value: '86400'
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: AsyncPollingInterval
+    value: '3600'
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: DynamicInjectionInstancePlaceholder
+    value: ''
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: FallbackIntegrationInstance
+    value: null
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: FetchInstanceByName
+    value: 'false'
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: HasApprovalLink
+    value: null
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: IntegrationInstance
+    value: AutomaticEnvironment
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: MessageToAssignee
+    value: null
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: PendingActionTimeout
+    value: null
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: RetryConfiguration
+    value: '{"Enabled":false,"IntervalInSeconds":30,"NumberOfRetries":1}'
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: ScriptName
+    value: Flare_Explain Identifier Match
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: ScriptParametersEntityFields
+    value: '{"Event UID":"[Event.flare_uid]","Identifier ID":"[Get Event Details.JsonResult| \"identifiers\" | first(1) | \"id\"]","Tenant ID":""}'
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: SelectedScopeName
+    value: All entities
+-   step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: UseEntitiesLoopScope
+    value: null
+action_name: Flare_Explain Identifier Match
+parallel_actions: []
+integration: Flare
+parent_container_id: null
+is_touched_by_ai: false
+is_debug_mock_data: false
+step_debug_data: null
+auto_skip_on_failure: false
+previous_result_condition: '{}'
+type: action

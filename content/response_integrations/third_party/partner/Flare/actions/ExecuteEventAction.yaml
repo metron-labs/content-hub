@@ -1,0 +1,30 @@
+name: Execute Event Action
+description: "Apply a triage action (remediate, ignore or unignore) to up to 10 Flare events. This changes the event state in Flare."
+integration_identifier: Flare
+parameters:
+-   name: Action Type
+    default_value: "remediate"
+    type: ddl
+    description: "Action to apply to the events."
+    is_mandatory: true
+    optional_values:
+    - remediate
+    - ignore
+    - unignore
+-   name: Event UIDs
+    default_value: ""
+    type: string
+    description: "Comma-separated Flare event UIDs (maximum 10)."
+    is_mandatory: true
+-   name: Tenant ID
+    default_value: ""
+    type: string
+    description: "Optional. Required only when the integration is configured with several tenant IDs; must be one of the configured IDs."
+    is_mandatory: false
+dynamic_results_metadata:
+-   result_example_path: resources/ExecuteEventAction_JsonResult_example.json
+    result_name: JsonResult
+    show_result: true
+default_result_value: ''
+creator: Admin
+script_result_name: is_success

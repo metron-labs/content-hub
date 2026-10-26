@@ -1,0 +1,5 @@
+{
+  "event_uid": "example-event-uid",
+  "identifier_id": "12345",
+  "explanation": "The event contains the monitored domain example.com."
+}

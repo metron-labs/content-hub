@@ -1,0 +1,11 @@
+{
+  "metadata": {
+    "uid": "example-event-uid",
+    "severity": "high",
+    "type": "leaked_credential",
+    "matched_at": "2026-10-20T10:15:00Z"
+  },
+  "data": {
+    "identity_name": "user@example.com"
+  }
+}

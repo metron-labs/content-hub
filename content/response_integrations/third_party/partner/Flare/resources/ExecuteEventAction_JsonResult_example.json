@@ -1,0 +1,7 @@
+{
+  "action": "remediate",
+  "event_uids": [
+    "example-event-uid"
+  ],
+  "response": {}
+}

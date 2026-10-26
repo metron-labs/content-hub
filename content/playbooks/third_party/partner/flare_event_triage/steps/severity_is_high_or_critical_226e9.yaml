@@ -1,0 +1,56 @@
+name: Condition
+description: Continue to remediate when the Flare event severity is high or critical. Otherwise ignore the event.
+identifier: 226e97ef-30c7-5da6-9c45-ef30acd64179
+original_step_id: 8a4c31d1-c8d2-50cb-a586-f16345469dcd
+playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+parent_step_ids:
+- bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+parent_step_id: bdcd9698-bb5d-5747-a2e2-810ae8dee7b2
+instance_name: Severity is high or critical
+is_automatic: true
+is_skippable: false
+action_provider: Flow
+start_loop_step_id: null
+parameters:
+-   step_id: 226e97ef-30c7-5da6-9c45-ef30acd64179
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: AssignedUsers
+    value: null
+-   step_id: 226e97ef-30c7-5da6-9c45-ef30acd64179
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: Branches
+    value: '[{"LogicalOperator":1,"Conditions":[{"Operator":0,"FieldName":"[Get Event Details.JsonResult| \"metadata.severity\"]","Type":7,"Value":"high","CustomOperatorName":null},{"Operator":0,"FieldName":"[Get Event Details.JsonResult| \"metadata.severity\"]","Type":7,"Value":"critical","CustomOperatorName":null}],"Order":1,"IsDefaultBranch":false,"Name":"High or Critical"},{"LogicalOperator":0,"Conditions":[],"Order":2,"IsDefaultBranch":true,"Name":"Lower Severity"}]'
+-   step_id: 226e97ef-30c7-5da6-9c45-ef30acd64179
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: ErrorFallbackBranch
+    value: null
+-   step_id: 226e97ef-30c7-5da6-9c45-ef30acd64179
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: HasApprovalLink
+    value: null
+-   step_id: 226e97ef-30c7-5da6-9c45-ef30acd64179
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: MessageToAssignee
+    value: null
+-   step_id: 226e97ef-30c7-5da6-9c45-ef30acd64179
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: PendingActionTimeout
+    value: null
+-   step_id: 226e97ef-30c7-5da6-9c45-ef30acd64179
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: SelectedScopeName
+    value: All entities
+-   step_id: 226e97ef-30c7-5da6-9c45-ef30acd64179
+    playbook_id: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+    name: UseEntitiesLoopScope
+    value: null
+action_name: IfFlowCondition
+parallel_actions: []
+integration: Flow
+parent_container_id: null
+is_touched_by_ai: false
+is_debug_mock_data: false
+step_debug_data: null
+auto_skip_on_failure: false
+previous_result_condition: '{}'
+type: condition

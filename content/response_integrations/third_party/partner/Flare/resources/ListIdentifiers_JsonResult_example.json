@@ -1,0 +1,11 @@
+{
+  "items": [
+    {
+      "id": "12345",
+      "type": "domain",
+      "name": "example.com",
+      "enabled": true
+    }
+  ],
+  "count": 1
+}

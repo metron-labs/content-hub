@@ -4,3 +4,13 @@
     item_type: Integration
     publish_time: '2026-10-16'
     ticket_number: No ticket
+-   description: Added 15 SOAR actions for events, global search, identifiers, alert rules, and entities, plus an example event triage playbook.
+    version: 2.0
+    item_name: Flare
+    item_type: Integration
+    publish_time: '2026-10-26'
+    ticket_number: No ticket
+    new: false
+    regressive: false
+    deprecated: false
+    removed: false

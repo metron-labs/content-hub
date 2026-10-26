@@ -15,25 +15,37 @@ import urllib.parse
 from typing import Optional
 
 import requests
+from flareio import FlareApiClient
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-from flareio import FlareApiClient
 
 from .constants import (
     BAD_REQUEST,
     DEFAULT_FLARE_API_URL,
     DEFAULT_HTTP_TIMEOUT,
+    ENDPOINT_ALERT_CHANNELS,
+    ENDPOINT_ALERTS,
+    ENDPOINT_ENTITIES,
+    ENDPOINT_ENTITIES_LIST,
     ENDPOINT_EVENT_ACTIONS,
+    ENDPOINT_EVENTS_AI_ASSISTANCE,
     ENDPOINT_EVENTS_DETAIL,
+    ENDPOINT_EVENTS_EXPAND,
+    ENDPOINT_EVENTS_EXPLAIN_IDENTIFIER,
     ENDPOINT_EVENTS_SEARCH,
     ENDPOINT_FILTER_SEVERITIES,
     ENDPOINT_FILTER_TYPES,
+    ENDPOINT_GLOBAL_SEARCH,
+    ENDPOINT_GLOBAL_SEARCH_QUOTA,
+    ENDPOINT_IDENTIFIERS,
     ENDPOINT_TENANTS,
+    EVENT_ACTION_TYPES,
     FLARE_BASIC_REQUESTS_PER_SECOND,
     FLARE_HTTP_RETRIES,
     FLARE_RATE_LIMIT_RETRY_WAIT_SECONDS,
     FLARE_SEARCH_REQUESTS_PER_SECOND,
     FORBIDDEN,
+    MAX_EVENT_ACTION_TARGETS,
     MAX_FLARE_PAGE_SIZE,
     MSG_BAD_REQUEST,
     MSG_FORBIDDEN,
@@ -42,6 +54,7 @@ from .constants import (
     MSG_SERVER_ERROR,
     MSG_UNAUTHORIZED,
     NOT_FOUND,
+    OFFSET_PAGE_SIZE,
     SERVER_ERROR,
     SEVERITY_OPTIONS,
     TOO_MANY_REQUESTS,
@@ -515,6 +528,279 @@ class FlareManager:
                 self._log("error", friendly)
 
         return {"applied": applied, "applied_uids": applied_uids, "errors": errors}
+
+    # --- Shared request / pagination helpers for actions ---
+
+    @staticmethod
+    def _quote(value: str) -> str:
+        return urllib.parse.quote(str(value).strip(), safe="")
+
+    def _call(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[dict] = None,
+        json: Optional[dict] = None,
+        context: str = "Flare API request",
+    ):
+        """
+        Single request path for actions.
+
+        Goes through pacing, 429/5xx retry and the 401 token refresh, then maps
+        HTTP errors to typed exceptions and returns the decoded JSON body
+        (``{}`` when the body is empty).
+        """
+        kwargs: dict = {}
+        if params:
+            kwargs["params"] = params
+        if json is not None:
+            kwargs["json"] = json
+        resp = self._request_with_auth_retry(method, path, **kwargs)
+        self._raise_for_status(resp, context)
+        try:
+            return resp.json()
+        except ValueError:
+            return {}
+
+    @staticmethod
+    def _extract_items(data) -> list:
+        """Return the record list from a list/dict page response."""
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for field in ("items", "data", "results", "entities", "identifiers", "alerts", "channels"):
+                candidate = data.get(field)
+                if isinstance(candidate, list):
+                    return candidate
+        return []
+
+    def _paginate_cursor(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict,
+        max_records: int,
+        page_size: int = MAX_FLARE_PAGE_SIZE,
+        context: str = "Flare API request",
+    ) -> list:
+        """Cursor pagination: the response ``next`` token is sent back as ``from``."""
+        items: list = []
+        cursor: Optional[str] = None
+        while len(items) < max_records:
+            payload = dict(body)
+            payload["size"] = min(page_size, max_records - len(items))
+            if cursor:
+                payload["from"] = cursor
+            data = self._call(method, path, json=payload, context=context)
+            page = self._extract_items(data)
+            items.extend(page)
+            cursor = data.get("next") if isinstance(data, dict) else None
+            if not cursor or not page:
+                break
+        return items[:max_records]
+
+    def _paginate_offset(
+        self,
+        path: str,
+        *,
+        params: Optional[dict],
+        max_records: int,
+        page_size: int = OFFSET_PAGE_SIZE,
+        context: str = "Flare API request",
+    ) -> list:
+        """limit/offset pagination; stops on a short or empty page."""
+        items: list = []
+        offset = 0
+        base = {k: v for k, v in (params or {}).items() if v not in (None, "")}
+        while len(items) < max_records:
+            limit = min(page_size, max_records - len(items))
+            data = self._call(
+                "get",
+                path,
+                params={**base, "limit": limit, "offset": offset},
+                context=context,
+            )
+            page = self._extract_items(data)
+            items.extend(page)
+            if len(page) < limit:
+                break
+            offset += limit
+        return items[:max_records]
+
+    # --- Events (actions) ---
+
+    def get_event_details(self, uid: str) -> dict:
+        return self._call(
+            "get",
+            ENDPOINT_EVENTS_DETAIL,
+            params={"uid": str(uid).strip()},
+            context="Get event details",
+        )
+
+    def get_event_field_details(self, uid: str, field_path: str) -> dict:
+        return self._call(
+            "get",
+            ENDPOINT_EVENTS_EXPAND,
+            params={"uid": str(uid).strip(), "field_path": str(field_path).strip()},
+            context="Get event field details",
+        )
+
+    def get_event_ai_insights(self, uid: str) -> dict:
+        return self._call(
+            "get",
+            ENDPOINT_EVENTS_AI_ASSISTANCE,
+            params={"uid": str(uid).strip()},
+            context="Get event AI insights",
+        )
+
+    def explain_identifier_match(self, uid: str, identifier_id: str) -> dict:
+        return self._call(
+            "get",
+            ENDPOINT_EVENTS_EXPLAIN_IDENTIFIER,
+            params={"uid": str(uid).strip(), "identifier_id": str(identifier_id).strip()},
+            context="Explain identifier match",
+        )
+
+    def execute_event_action(self, action: str, uids: list) -> dict:
+        """POST /firework/v4/events/actions for up to MAX_EVENT_ACTION_TARGETS UIDs."""
+        action_type = str(action or "").strip().lower()
+        if action_type not in EVENT_ACTION_TYPES:
+            raise FlareValidationException(
+                f"Invalid Action Type: {action}. Valid values: "
+                f"{', '.join(EVENT_ACTION_TYPES)}."
+            )
+        targets = list(dict.fromkeys(str(u).strip() for u in uids if str(u).strip()))
+        if not targets:
+            raise FlareValidationException("At least one Event UID is required.")
+        if len(targets) > MAX_EVENT_ACTION_TARGETS:
+            raise FlareValidationException(
+                f"A maximum of {MAX_EVENT_ACTION_TARGETS} Event UIDs can be "
+                f"processed per execution. Received {len(targets)}."
+            )
+        payload = {
+            "action": {"type": action_type},
+            "targets": [{"uid": uid} for uid in targets],
+        }
+        self._log("info", "Flare execute event action %s targets=%d", action_type, len(targets))
+        return self._call(
+            "post", ENDPOINT_EVENT_ACTIONS, json=payload, context="Execute event action"
+        )
+
+    # --- Global search ---
+
+    def search_global(
+        self,
+        query: str,
+        categories: Optional[list] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        max_records: int = 50,
+    ) -> list:
+        body: dict = {"query": {"type": "query_string", "query": query}}
+        filters: dict = {}
+        if categories:
+            filters["type"] = list(categories)
+        date_range: dict = {}
+        if from_date:
+            date_range["gte"] = from_date
+        if to_date:
+            date_range["lte"] = to_date
+        if date_range:
+            filters["estimated_created_at"] = date_range
+        if filters:
+            body["filters"] = filters
+        return self._paginate_cursor(
+            "post",
+            ENDPOINT_GLOBAL_SEARCH,
+            body=body,
+            max_records=max_records,
+            context="Global search",
+        )
+
+    def get_global_search_quota(self) -> dict:
+        return self._call("get", ENDPOINT_GLOBAL_SEARCH_QUOTA, context="Get global search quota")
+
+    # --- Identifiers ---
+
+    def list_identifiers(
+        self,
+        identifier_type: Optional[str] = None,
+        status: Optional[str] = None,
+        max_records: int = 50,
+    ) -> list:
+        return self._paginate_offset(
+            ENDPOINT_IDENTIFIERS,
+            params={"type": identifier_type, "status": status},
+            max_records=max_records,
+            context="List identifiers",
+        )
+
+    def get_identifier(self, identifier_id: str) -> dict:
+        return self._call(
+            "get",
+            f"{ENDPOINT_IDENTIFIERS}{self._quote(identifier_id)}",
+            context="Get identifier details",
+        )
+
+    def set_identifier_status(self, identifier_id: str, enabled: bool) -> dict:
+        return self._call(
+            "post",
+            f"{ENDPOINT_IDENTIFIERS}{self._quote(identifier_id)}/status",
+            json={"enabled": bool(enabled)},
+            context="Set identifier status",
+        )
+
+    # --- Alerts ---
+
+    def list_alerts(self, max_records: int = 50) -> list:
+        return self._paginate_offset(
+            ENDPOINT_ALERTS, params=None, max_records=max_records, context="List alerts"
+        )
+
+    def get_alert(self, alert_id: str) -> dict:
+        return self._call(
+            "get", f"{ENDPOINT_ALERTS}{self._quote(alert_id)}", context="Get alert details"
+        )
+
+    def list_alert_channels(self, channel_type: Optional[str] = None) -> list:
+        params = {"type": channel_type} if channel_type else None
+        data = self._call(
+            "get", ENDPOINT_ALERT_CHANNELS, params=params, context="List alert channels"
+        )
+        return self._extract_items(data)
+
+    # --- Entities ---
+
+    def list_entities(
+        self,
+        entity_type: Optional[str] = None,
+        query: Optional[str] = None,
+        max_records: int = 50,
+    ) -> list:
+        """POST /entities/_list, paged with limit/offset in the request body."""
+        items: list = []
+        offset = 0
+        while len(items) < max_records:
+            limit = min(OFFSET_PAGE_SIZE, max_records - len(items))
+            body: dict = {"tenant_id": self.tenant_id, "limit": limit, "offset": offset}
+            if entity_type:
+                body["type"] = entity_type
+            if query:
+                body["query"] = query
+            data = self._call("post", ENDPOINT_ENTITIES_LIST, json=body, context="List entities")
+            page = self._extract_items(data)
+            items.extend(page)
+            if len(page) < limit:
+                break
+            offset += limit
+        return items[:max_records]
+
+    def get_entity(self, entity_id: str) -> dict:
+        return self._call(
+            "get", f"{ENDPOINT_ENTITIES}{self._quote(entity_id)}", context="Get entity details"
+        )
 
     def test_connection(self, validate_tenant: bool = True) -> bool:
         """Authenticate with the API key, then confirm the tenant is reachable.

@@ -1,0 +1,10 @@
+{
+  "items": [
+    {
+      "id": "abc",
+      "type": "threat_actor",
+      "name": "Example Actor"
+    }
+  ],
+  "count": 1
+}

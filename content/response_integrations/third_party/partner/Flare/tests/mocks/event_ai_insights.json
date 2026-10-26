@@ -1,0 +1,6 @@
+{
+  "summary": "Credential exposed in stealer log.",
+  "recommendations": [
+    "Reset password"
+  ]
+}

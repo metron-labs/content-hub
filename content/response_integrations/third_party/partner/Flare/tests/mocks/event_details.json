@@ -1,0 +1,10 @@
+{
+  "metadata": {
+    "uid": "evt-1",
+    "severity": "high",
+    "type": "leaked_credential"
+  },
+  "data": {
+    "identity_name": "user@example.com"
+  }
+}

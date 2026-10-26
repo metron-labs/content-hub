@@ -1,0 +1,9 @@
+-   description: Initial reference playbook that enriches a Flare event and remediates high or critical events.
+    version: 1.0
+    item_name: Flare - Event Triage and Response
+    item_type: Playbook
+    publish_time: '2026-10-26'
+    new: true
+    regressive: false
+    deprecated: false
+    removed: false

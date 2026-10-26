@@ -1,0 +1,28 @@
+identifier: 7c4e1a20-6b8d-4f33-9a15-2d0e8f6c4b71
+is_enable: true
+version: 0.0
+name: Flare - Event Triage and Response
+description: Reference playbook for a Flare connector case. It loads the event,
+  its AI insights and the identifier match, then remediates high and critical
+  events and ignores the rest. Confirm this scenario with the Flare team before
+  enabling it to run automatically. Execute Event Action changes event state in Flare.
+debug_alert_identifier: null
+debug_base_alert_identifier: null
+is_debug_mode: false
+type: playbook
+template_name: null
+original_workflow_identifier: b1a0e3d4-55c2-4a17-8e90-6f2c1d9a0e33
+version_comment: null
+version_creator: null
+creator: 4e8b2c10-91d4-4a6e-b7f3-0c5d8a1e6f42
+priority: 1
+category: 16
+is_automatic: false
+is_archived: false
+last_editor: null
+default_access_level: edit
+creation_source: user_or_api_initiated
+simulation_clone: false
+permissions: [ ]
+environments:
+  - '*'

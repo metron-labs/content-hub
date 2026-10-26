@@ -1,0 +1,9 @@
+{
+  "id": "abc",
+  "type": "threat_actor",
+  "name": "Example Actor",
+  "aliases": [
+    "Actor X"
+  ],
+  "risk_level": "high"
+}

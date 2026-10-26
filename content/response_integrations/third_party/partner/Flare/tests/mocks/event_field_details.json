@@ -1,0 +1,9 @@
+{
+  "uid": "evt-1",
+  "field_path": "data.credentials",
+  "value": [
+    {
+      "username": "user@example.com"
+    }
+  ]
+}

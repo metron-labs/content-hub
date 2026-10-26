@@ -1,4 +1,5 @@
 """Shared helpers for timestamps, filters, and historical backfill."""
+
 from __future__ import annotations
 
 import json
@@ -10,6 +11,8 @@ from typing import Any, Optional
 
 from .constants import (
     DEFAULT_FLARE_APP_URL,
+    DEFAULT_MAX_RECORDS,
+    HARD_MAX_RECORDS,
     MAX_BACKFILL_RANGE_DAYS,
     MSG_BAD_REQUEST,
     MSG_FORBIDDEN,
@@ -80,15 +83,11 @@ def parse_tenant_ids(value: Any) -> list:
         token = str(part).strip()
         if not token.isdigit():
             raise FlareValidationException(
-                "Flare Tenant ID must be a number (or a comma-separated list of "
-                f"numbers). Invalid value: {token}."
+                f"Flare Tenant ID must be a number (or a comma-separated list of numbers). Invalid value: {token}."
             )
         tenant_id = int(token)
         if tenant_id <= 0:
-            raise FlareValidationException(
-                "Flare Tenant ID must be a positive number. "
-                f"Invalid value: {tenant_id}."
-            )
+            raise FlareValidationException(f"Flare Tenant ID must be a positive number. Invalid value: {tenant_id}.")
         if tenant_id in seen:
             continue
         seen.add(tenant_id)
@@ -120,9 +119,7 @@ def format_user_facing_error(exc: BaseException) -> str:
     raw = str(exc or "").strip()
     lower = raw.lower()
 
-    if "invalid literal for int" in lower or (
-        "tenant id" in lower and "number" in lower
-    ):
+    if "invalid literal for int" in lower or ("tenant id" in lower and "number" in lower):
         return "Flare Tenant ID must be a number. Please enter a valid tenant ID."
     if any(token in lower for token in ("invalid_key", "invalid api key", "unauthorized")):
         return MSG_UNAUTHORIZED
@@ -132,10 +129,7 @@ def format_user_facing_error(exc: BaseException) -> str:
         return MSG_RATE_LIMIT
     if "timeout" in lower or "timed out" in lower:
         return "Connection to Flare timed out. Check network access and try again."
-    if any(
-        token in lower
-        for token in ("connection", "name or service not known", "nodename")
-    ):
+    if any(token in lower for token in ("connection", "name or service not known", "nodename")):
         return "Unable to reach the Flare API. Check network access and try again."
 
     status_match = _HTTP_STATUS_RE.search(raw)
@@ -166,7 +160,7 @@ def _strip_raw_payload(message: str) -> str:
     text = _JSONISH_RE.sub("", text)
     text = re.sub(r"\s+", " ", text).strip(" :-")
     # Prefer the first sentence-like chunk when the platform appends a traceback hint.
-    for sep in ("Traceback", "File \"", "\n"):
+    for sep in ("Traceback", 'File "', "\n"):
         if sep in text:
             text = text.split(sep, 1)[0].strip(" :-")
     return text[:300]
@@ -208,10 +202,7 @@ def format_flare_timestamp(value: Optional[str]) -> Optional[str]:
         return value.strip() if isinstance(value, str) and value.strip() else None
     parsed = parsed.astimezone(timezone.utc)
     if parsed.microsecond:
-        return (
-            parsed.strftime("%Y-%m-%dT%H:%M:%S.")
-            + f"{parsed.microsecond:06d}Z"
-        )
+        return parsed.strftime("%Y-%m-%dT%H:%M:%S.") + f"{parsed.microsecond:06d}Z"
     return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -225,16 +216,10 @@ def validate_backfill_range_days(val: Any) -> int:
     try:
         days = int(val)
     except (TypeError, ValueError):
-        raise ValueError(
-            f"Backfill Range (Days) must be an integer from 0 to "
-            f"{MAX_BACKFILL_RANGE_DAYS}."
-        )
+        raise ValueError(f"Backfill Range (Days) must be an integer from 0 to {MAX_BACKFILL_RANGE_DAYS}.")
 
     if days < 0 or days > MAX_BACKFILL_RANGE_DAYS:
-        raise ValueError(
-            f"Backfill Range (Days) must be between 0 and "
-            f"{MAX_BACKFILL_RANGE_DAYS}; received {days}."
-        )
+        raise ValueError(f"Backfill Range (Days) must be between 0 and {MAX_BACKFILL_RANGE_DAYS}; received {days}.")
 
     return days
 
@@ -252,9 +237,7 @@ def default_backfill_start(backfill_days: Any) -> str:
         return utc_now_iso()
 
     now_ist = datetime.now(IST)
-    start_ist = (now_ist - timedelta(days=days)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    start_ist = (now_ist - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
     return start_ist.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -433,9 +416,7 @@ def extract_filter_options(
         → leaf types plus parent categories with expand_to=[...]
     """
     if isinstance(raw, dict) and isinstance(raw.get("categories"), list):
-        return _extract_categorized_filter_options(
-            raw["categories"], extra_label_map=extra_label_map
-        )
+        return _extract_categorized_filter_options(raw["categories"], extra_label_map=extra_label_map)
 
     items: list = []
     if raw is None:
@@ -517,9 +498,7 @@ def _format_valid_filter_options(options: list) -> str:
                 token = _normalize_filter_token(child_key)
                 child_labels.append(label_by_key.get(token) or str(child_key))
             children = ", ".join(child_labels) if child_labels else "(none)"
-            blocks.append(
-                f"• {cat_label} (Category)\n  └── {children}"
-            )
+            blocks.append(f"• {cat_label} (Category)\n  └── {children}")
         return "Valid structural options are:\n\n" + "\n\n".join(blocks)
 
     labels = [_option_display_label(opt) for opt in options if opt.get("key")]
@@ -584,12 +563,10 @@ def resolve_selected_filters(
 
     if unknown:
         raise FlareValidationException(
-            f"Invalid {filter_name} value(s): {', '.join(unknown)}.\n"
-            f"{_format_valid_filter_options(options)}"
+            f"Invalid {filter_name} value(s): {', '.join(unknown)}.\n{_format_valid_filter_options(options)}"
         )
 
     return resolved
-
 
 
 def extract_event_timestamp(event: dict) -> str:
@@ -628,3 +605,90 @@ def cap_page_size(size: int, maximum: int = 10) -> int:
     except (TypeError, ValueError):
         size = maximum
     return max(1, min(size, maximum))
+
+
+# --- Action input helpers ---
+
+
+def parse_bool(value: Any, default: bool = False) -> bool:
+    """Parse a SOAR checkbox / string value into a bool."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in ("true", "1", "yes", "y", "on"):
+        return True
+    if text in ("false", "0", "no", "n", "off"):
+        return False
+    raise FlareValidationException(f"Invalid boolean value: {value}. Use true or false.")
+
+
+def require_non_empty(value: Any, name: str) -> str:
+    """Return the stripped string value or raise a validation error."""
+    text = str(value if value is not None else "").strip()
+    if not text:
+        raise FlareValidationException(f"{name} is required and cannot be empty.")
+    return text
+
+
+def parse_max_records(
+    value: Any,
+    name: str = "Max Records To Return",
+    default: int = DEFAULT_MAX_RECORDS,
+    maximum: int = HARD_MAX_RECORDS,
+) -> int:
+    """Validate a record-limit input (integer between 1 and ``maximum``)."""
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        number = int(str(value).strip())
+    except ValueError as exc:
+        raise FlareValidationException(f"{name} must be a whole number.") from exc
+    if number < 1 or number > maximum:
+        raise FlareValidationException(f"{name} must be between 1 and {maximum}.")
+    return number
+
+
+def parse_optional_iso_date(value: Any, name: str) -> Optional[str]:
+    """Validate an ISO 8601 date/time input; return it normalised to UTC (or None)."""
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None
+    parsed = parse_iso_timestamp(text)
+    if parsed is None:
+        raise FlareValidationException(f"{name} must be a valid ISO 8601 date/time, e.g. 2026-01-31T00:00:00Z.")
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def resolve_action_tenant(config_value: Any, override: Any = None) -> int:
+    """
+    Pick the single tenant an action runs against.
+
+    The integration config accepts several tenants, but an action works on
+    one. An explicit ``Tenant ID`` action parameter wins (and must be one of
+    the configured tenants). Without it the config must hold exactly one.
+    """
+    configured = parse_tenant_ids(config_value)
+    override_text = str(override if override is not None else "").strip()
+    if override_text:
+        chosen = parse_tenant_id(override_text)
+        if chosen not in configured:
+            allowed = ", ".join(str(t) for t in configured)
+            raise FlareValidationException(
+                f"Tenant ID {chosen} is not configured for this integration. Configured tenant ID(s): {allowed}."
+            )
+        return chosen
+    if len(configured) == 1:
+        return configured[0]
+    allowed = ", ".join(str(t) for t in configured)
+    raise FlareValidationException(
+        f"The integration is configured with several tenants. Set the Tenant ID action parameter to one of: {allowed}."
+    )
+
+
+def split_csv_param(value: Any) -> list:
+    """Parse a CSV action parameter into a de-duplicated list (order kept)."""
+    return list(dict.fromkeys(parse_csv_list(value)))
