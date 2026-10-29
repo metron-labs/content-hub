@@ -266,7 +266,7 @@ def create_alerts(
         alert.display_id = f"{VENDOR_NAME}:{finding_key}"
         alert.ticket_id = alert_id
         # Stable rule_generator so closed-case ticket lookup finds Flare alerts.
-        alert.rule_generator = VENDOR_NAME+"test-3"
+        alert.rule_generator = VENDOR_NAME+"test-133"
         alert.device_event_class_id = alert_id
         alert.name = _title(event)
         # Grouping key is the monitored hostname from identifiers[].name.

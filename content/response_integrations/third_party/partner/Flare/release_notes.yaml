@@ -24,3 +24,14 @@
     regressive: false
     deprecated: false
     removed: false
+-   description: Flare Connector - Mapped event StartTime and EndTime in the ontology so
+        event timestamps show the Flare finding time instead of 1970.
+    version: 2.2
+    item_name: Flare Connector
+    item_type: Connector
+    publish_time: '2026-10-29'
+    ticket_number: No ticket
+    new: false
+    regressive: false
+    deprecated: false
+    removed: false

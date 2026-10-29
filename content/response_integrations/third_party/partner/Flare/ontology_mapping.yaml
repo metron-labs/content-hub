@@ -1,6 +1,7 @@
 # Common Flare search fields that match SecOps entities.
 # identifiers[].name is copied onto the event as DestinationHostName.
 # metadata.flare_url is already on the event as flare_url.
+# StartTime/EndTime are epoch ms from the finding time and feed event_timestamp.
 # highlights, tenant_metadata, and the full finding JSON are not mapped.
 -   extract_function: none
     extract_function_param: ''
@@ -29,4 +30,32 @@
     security_event_file_name: DestinationURL
     source: Flare
     transformation_function: to_string
+    transformation_function_param: null
+-   extract_function: none
+    extract_function_param: ''
+    is_artifact: false
+    product: Flare
+    raw_data_primary_field_comparison_type: equal
+    raw_data_primary_field_match_term: StartTime
+    raw_data_secondary_field_comparison_type: equal
+    raw_data_secondary_field_match_term: null
+    raw_data_third_field_comparison_type: equal
+    raw_data_third_field_match_term: null
+    security_event_file_name: StartTime
+    source: Flare
+    transformation_function: from_unix_time_string_or_long
+    transformation_function_param: null
+-   extract_function: none
+    extract_function_param: ''
+    is_artifact: false
+    product: Flare
+    raw_data_primary_field_comparison_type: equal
+    raw_data_primary_field_match_term: EndTime
+    raw_data_secondary_field_comparison_type: equal
+    raw_data_secondary_field_match_term: null
+    raw_data_third_field_comparison_type: equal
+    raw_data_third_field_match_term: null
+    security_event_file_name: EndTime
+    source: Flare
+    transformation_function: from_unix_time_string_or_long
     transformation_function_param: null

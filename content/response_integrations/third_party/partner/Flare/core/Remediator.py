@@ -322,7 +322,7 @@ class SoarRemediator:
         self,
         flare_manager,
         siemplify,
-        rule_generator: str = VENDOR_NAME+"Flare-test-2",
+        rule_generator: str = VENDOR_NAME,
         state: Optional[dict] = None,
         logger_instance=None,
     ) -> None:
