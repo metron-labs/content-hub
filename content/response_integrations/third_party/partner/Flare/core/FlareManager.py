@@ -6,6 +6,7 @@ and auto-refresh. Paces calls to Flare's per-organization limits (basic 4/s,
 search 1/s) and retries HTTP 429 after the 10 seconds Flare recommends.
 Also retries 5xx and refreshes the token once on HTTP 401.
 """
+
 from __future__ import annotations
 
 import logging
@@ -27,12 +28,15 @@ from .constants import (
     ENDPOINT_ALERTS,
     ENDPOINT_ENTITIES,
     ENDPOINT_ENTITIES_LIST,
+    ENDPOINT_ENTITIES_RELATIONS,
     ENDPOINT_EVENT_ACTIONS,
     ENDPOINT_EVENTS_AI_ASSISTANCE,
+    ENDPOINT_EVENTS_CREDENTIAL_ACTIONS,
     ENDPOINT_EVENTS_DETAIL,
     ENDPOINT_EVENTS_EXPAND,
     ENDPOINT_EVENTS_EXPLAIN_IDENTIFIER,
     ENDPOINT_EVENTS_SEARCH,
+    ENDPOINT_EVENTS_TENANT_METADATA,
     ENDPOINT_FILTER_SEVERITIES,
     ENDPOINT_FILTER_TYPES,
     ENDPOINT_GLOBAL_SEARCH,
@@ -167,11 +171,7 @@ class _TimeoutHTTPAdapter(HTTPAdapter):
         super().__init__(*args, **kwargs)
 
     def send(self, request, **kwargs):
-        pace = (
-            self._search_pace
-            if _is_search_url(getattr(request, "url", ""))
-            else self._basic_pace
-        )
+        pace = self._search_pace if _is_search_url(getattr(request, "url", "")) else self._basic_pace
         if pace is not None:
             pace.wait()
         kwargs.setdefault("timeout", self._default_timeout)
@@ -192,7 +192,7 @@ def _build_session(api_key: str, ssl_verify: bool = True) -> requests.Session:
             503,
             504,
         ],
-        allowed_methods={"GET", "POST"},
+        allowed_methods={"GET", "POST", "PATCH"},
     )
     if hasattr(retry, "backoff_max"):
         retry.backoff_max = 60  # type: ignore[attr-defined]
@@ -256,11 +256,17 @@ class FlareManager:
     def _refresh_token(self) -> None:
         self.client.generate_token()
 
+    def _invoke(self, method: str, path: str, **kwargs):
+        """Call the SDK verb, or its generic request for methods it does not wrap."""
+        fn = getattr(self.client, method.lower(), None)
+        if callable(fn):
+            return fn(path, **kwargs)
+        return self.client._request(method=method.upper(), url=path, **kwargs)
+
     def _request_with_auth_retry(self, method: str, path: str, **kwargs):
         """Execute SDK request; on 401 refresh token and retry once."""
-        fn = getattr(self.client, method.lower())
         try:
-            resp = fn(path, **kwargs)
+            resp = self._invoke(method, path, **kwargs)
         except Exception as exc:
             if _is_rate_limit_error(exc):
                 raise FlareRateLimitException(MSG_RATE_LIMIT) from exc
@@ -275,7 +281,7 @@ class FlareManager:
                     raise FlareRateLimitException(MSG_RATE_LIMIT) from exc
                 raise FlareUnauthorizedException(MSG_UNAUTHORIZED) from exc
             try:
-                resp = fn(path, **kwargs)
+                resp = self._invoke(method, path, **kwargs)
             except Exception as exc:
                 if _is_rate_limit_error(exc):
                     raise FlareRateLimitException(MSG_RATE_LIMIT) from exc
@@ -329,10 +335,7 @@ class FlareManager:
         )
         if options:
             return options
-        return [
-            {"key": key, "labels": {key, display}}
-            for key, display in TYPE_DISPLAY_NAME.items()
-        ]
+        return [{"key": key, "labels": {key, display}} for key, display in TYPE_DISPLAY_NAME.items()]
 
     def fetch_tenants(self) -> list:
         """Tenants this API key can access. Raises on auth/API failure."""
@@ -373,20 +376,16 @@ class FlareManager:
 
         if not available:
             raise FlareValidationException(
-                "No Flare tenants are accessible with this API key. "
-                "Check the API key permissions in Flare."
+                "No Flare tenants are accessible with this API key. Check the API key permissions in Flare."
             )
 
         for tenant in available:
             if tenant["id"] == self.tenant_id:
                 return tenant
 
-        allowed = ", ".join(
-            f"{t['id']}" + (f" ({t['name']})" if t["name"] else "") for t in available
-        )
+        allowed = ", ".join(f"{t['id']}" + (f" ({t['name']})" if t["name"] else "") for t in available)
         raise FlareValidationException(
-            f"Flare Tenant ID {self.tenant_id} is not available for this API key. "
-            f"Available tenant ID(s): {allowed}."
+            f"Flare Tenant ID {self.tenant_id} is not available for this API key. Available tenant ID(s): {allowed}."
         )
 
     # --- Events ---
@@ -416,9 +415,7 @@ class FlareManager:
         if filters:
             search_body["filters"] = filters
 
-        resp = self._request_with_auth_retry(
-            "post", ENDPOINT_EVENTS_SEARCH, json=search_body
-        )
+        resp = self._request_with_auth_retry("post", ENDPOINT_EVENTS_SEARCH, json=search_body)
         self._raise_for_status(resp, "Event search")
         return resp.json()
 
@@ -430,9 +427,7 @@ class FlareManager:
 
         encoded_uid = urllib.parse.quote(uid, safe="")
         try:
-            resp = self._request_with_auth_retry(
-                "get", f"{ENDPOINT_EVENTS_DETAIL}?uid={encoded_uid}"
-            )
+            resp = self._request_with_auth_retry("get", f"{ENDPOINT_EVENTS_DETAIL}?uid={encoded_uid}")
             self._raise_for_status(resp, f"Enrich event {uid}")
             full_detail = resp.json()
             if not isinstance(full_detail, dict):
@@ -484,9 +479,7 @@ class FlareManager:
             len(uids),
             uids,
         )
-        resp = self._request_with_auth_retry(
-            "post", ENDPOINT_EVENT_ACTIONS, json=payload
-        )
+        resp = self._request_with_auth_retry("post", ENDPOINT_EVENT_ACTIONS, json=payload)
         try:
             body = resp.json()
         except Exception:
@@ -517,9 +510,7 @@ class FlareManager:
 
                 status = int(result.get("status_code") or 500)
                 if status >= 400:
-                    raise FlareException(
-                        f"Flare remediate failed (HTTP {status})."
-                    )
+                    raise FlareException(f"Flare remediate failed (HTTP {status}).")
                 applied += len(batch)
                 applied_uids.extend(batch)
             except Exception as exc:
@@ -668,8 +659,7 @@ class FlareManager:
         action_type = str(action or "").strip().lower()
         if action_type not in EVENT_ACTION_TYPES:
             raise FlareValidationException(
-                f"Invalid Action Type: {action}. Valid values: "
-                f"{', '.join(EVENT_ACTION_TYPES)}."
+                f"Invalid Action Type: {action}. Valid values: {', '.join(EVENT_ACTION_TYPES)}."
             )
         targets = list(dict.fromkeys(str(u).strip() for u in uids if str(u).strip()))
         if not targets:
@@ -684,8 +674,53 @@ class FlareManager:
             "targets": [{"uid": uid} for uid in targets],
         }
         self._log("info", "Flare execute event action %s targets=%d", action_type, len(targets))
+        return self._call("post", ENDPOINT_EVENT_ACTIONS, json=payload, context="Execute event action")
+
+    def execute_credential_action(self, action: str, credential_ids: list) -> dict:
+        """POST /events/credential-actions for leaked credentials inside events."""
+        action_type = str(action or "").strip().lower()
+        if not action_type:
+            raise FlareValidationException("Action Type is required.")
+        targets = list(dict.fromkeys(str(item).strip() for item in credential_ids if str(item).strip()))
+        if not targets:
+            raise FlareValidationException("At least one Credential ID is required.")
+        payload = {"action": {"type": action_type}, "credential_ids": targets}
+        self._log("info", "Flare credential action %s targets=%d", action_type, len(targets))
         return self._call(
-            "post", ENDPOINT_EVENT_ACTIONS, json=payload, context="Execute event action"
+            "post",
+            ENDPOINT_EVENTS_CREDENTIAL_ACTIONS,
+            json=payload,
+            context="Execute credential action",
+        )
+
+    def update_tenant_metadata(
+        self,
+        uid: str,
+        severity: Optional[str] = None,
+        tags: Optional[list] = None,
+        notes: Optional[str] = None,
+    ) -> dict:
+        """PATCH /events/tenant-metadata for one event. Only supplied fields are sent."""
+        body: dict = {}
+        if severity and str(severity).strip():
+            value = str(severity).strip().lower()
+            if value not in SEVERITY_OPTIONS:
+                raise FlareValidationException(
+                    f"Invalid Severity: {severity}. Valid values: {', '.join(SEVERITY_OPTIONS)}."
+                )
+            body["severity"] = value
+        if tags:
+            body["tags"] = list(tags)
+        if notes is not None and str(notes).strip():
+            body["notes"] = str(notes).strip()
+        if not body:
+            raise FlareValidationException("Set at least one of Severity, Tags, or Notes.")
+        return self._call(
+            "patch",
+            ENDPOINT_EVENTS_TENANT_METADATA,
+            params={"uid": str(uid).strip()},
+            json=body,
+            context="Update tenant metadata",
         )
 
     # --- Global search ---
@@ -755,20 +790,14 @@ class FlareManager:
     # --- Alerts ---
 
     def list_alerts(self, max_records: int = 50) -> list:
-        return self._paginate_offset(
-            ENDPOINT_ALERTS, params=None, max_records=max_records, context="List alerts"
-        )
+        return self._paginate_offset(ENDPOINT_ALERTS, params=None, max_records=max_records, context="List alerts")
 
     def get_alert(self, alert_id: str) -> dict:
-        return self._call(
-            "get", f"{ENDPOINT_ALERTS}{self._quote(alert_id)}", context="Get alert details"
-        )
+        return self._call("get", f"{ENDPOINT_ALERTS}{self._quote(alert_id)}", context="Get alert details")
 
     def list_alert_channels(self, channel_type: Optional[str] = None) -> list:
         params = {"type": channel_type} if channel_type else None
-        data = self._call(
-            "get", ENDPOINT_ALERT_CHANNELS, params=params, context="List alert channels"
-        )
+        data = self._call("get", ENDPOINT_ALERT_CHANNELS, params=params, context="List alert channels")
         return self._extract_items(data)
 
     # --- Entities ---
@@ -798,9 +827,34 @@ class FlareManager:
         return items[:max_records]
 
     def get_entity(self, entity_id: str) -> dict:
-        return self._call(
-            "get", f"{ENDPOINT_ENTITIES}{self._quote(entity_id)}", context="Get entity details"
-        )
+        return self._call("get", f"{ENDPOINT_ENTITIES}{self._quote(entity_id)}", context="Get entity details")
+
+    def list_entity_relations(
+        self,
+        entity_id: str,
+        relation_types: Optional[list] = None,
+        max_records: int = 50,
+    ) -> list:
+        """POST /entities/relations, paged with limit/offset in the request body."""
+        items: list = []
+        offset = 0
+        while len(items) < max_records:
+            limit = min(OFFSET_PAGE_SIZE, max_records - len(items))
+            body: dict = {
+                "entity_id": str(entity_id).strip(),
+                "tenant_id": self.tenant_id,
+                "limit": limit,
+                "offset": offset,
+            }
+            if relation_types:
+                body["relation_types"] = list(relation_types)
+            data = self._call("post", ENDPOINT_ENTITIES_RELATIONS, json=body, context="List entity relations")
+            page = self._extract_items(data)
+            items.extend(page)
+            if len(page) < limit:
+                break
+            offset += limit
+        return items[:max_records]
 
     def test_connection(self, validate_tenant: bool = True) -> bool:
         """Authenticate with the API key, then confirm the tenant is reachable.
@@ -826,8 +880,7 @@ class FlareManager:
         # After the API key is known-good, treat auth/forbidden failures for the
         # tenant-scoped client as a Tenant ID problem (not a bad API key).
         tenant_error = FlareValidationException(
-            f"Flare Tenant ID {self.tenant_id} is not valid for this API key. "
-            "Check the tenant ID and try again."
+            f"Flare Tenant ID {self.tenant_id} is not valid for this API key. Check the tenant ID and try again."
         )
         if validate_tenant:
             try:

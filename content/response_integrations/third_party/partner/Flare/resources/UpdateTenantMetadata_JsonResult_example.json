@@ -1,0 +1,8 @@
+{
+  "event_uid": "example-event-uid",
+  "response": {
+    "severity": "high",
+    "tags": ["reviewed"],
+    "notes": "Confirmed with the asset owner."
+  }
+}

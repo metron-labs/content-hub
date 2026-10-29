@@ -25,6 +25,9 @@ GET_ALERT_DETAILS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Alert Details"
 LIST_ALERT_CHANNELS_SCRIPT_NAME = f"{INTEGRATION_NAME} - List Alert Channels"
 LIST_ENTITIES_SCRIPT_NAME = f"{INTEGRATION_NAME} - List Entities"
 GET_ENTITY_DETAILS_SCRIPT_NAME = f"{INTEGRATION_NAME} - Get Entity Details"
+EXECUTE_CREDENTIAL_ACTION_SCRIPT_NAME = f"{INTEGRATION_NAME} - Execute Credential Action"
+UPDATE_TENANT_METADATA_SCRIPT_NAME = f"{INTEGRATION_NAME} - Update Tenant Metadata"
+LIST_ENTITY_RELATIONS_SCRIPT_NAME = f"{INTEGRATION_NAME} - List Entity Relations"
 
 # Connector
 THREAT_FINDINGS_CONNECTOR_NAME = "Flare Connector"
@@ -51,6 +54,9 @@ ENDPOINT_ALERTS = "/firework/v4/alerts/"
 ENDPOINT_ALERT_CHANNELS = "/firework/v4/alerts/channels"
 ENDPOINT_ENTITIES_LIST = "/entities/_list"
 ENDPOINT_ENTITIES = "/entities/"
+ENDPOINT_EVENTS_CREDENTIAL_ACTIONS = "/events/credential-actions"
+ENDPOINT_EVENTS_TENANT_METADATA = "/events/tenant-metadata"
+ENDPOINT_ENTITIES_RELATIONS = "/entities/relations"
 
 # Action inputs
 EVENT_ACTION_TYPES = ("remediate", "ignore", "unignore")
@@ -71,7 +77,7 @@ DEFAULT_SDK_HTTP_TIMEOUT = (10, 60)
 MAX_BACKFILL_RANGE_DAYS = 180
 MAX_FLARE_PAGE_SIZE = 10
 # Package / integration release version (keep defs in sync).
-INTEGRATION_VERSION = 2.0
+INTEGRATION_VERSION = 2.1
 SEVERITY_OPTIONS = ("info", "low", "medium", "high", "critical")
 SEVERITY_TO_ALERT_PRIORITY = {
     "critical": 100,

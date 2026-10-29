@@ -1,0 +1,27 @@
+// #"flare"
+
+metadata.product_log_id = "e3d9e77f-0739-45ff-ba86-42ae1a264e37"
+metadata.event_timestamp.seconds = 0
+metadata.event_timestamp.nanos = 0
+metadata.event_type = "GENERIC_EVENT"
+metadata.vendor_name = "Flare"
+metadata.product_name = "Flare"
+metadata.ingested_timestamp.seconds = 1793250370
+metadata.ingested_timestamp.nanos = 745510000
+metadata.id = b"AAAAAPqNO5oHiCkcwfADNwNUn8wAAAAAFAAAAAAAAAA="
+metadata.log_type = "UDM"
+metadata.base_labels.log_types = "UDM"
+metadata.base_labels.allow_scoped_access = true
+
+// doppel
+metadata.product_log_id = "0d82e86d-b3f1-4f89-bea0-cc4b3fc2c822"
+metadata.event_timestamp.seconds = 1792158099
+metadata.event_timestamp.nanos = 318000000
+metadata.event_type = "GENERIC_EVENT"
+metadata.product_name = "Doppel"
+metadata.ingested_timestamp.seconds = 1792158100
+metadata.ingested_timestamp.nanos = 418069000
+metadata.id = b"AAAAANuL5FwoMFtRBuln5uzouJEAAAAAFAAAAAAAAAA="
+metadata.log_type = "UDM"
+metadata.base_labels.log_types = "UDM"
+metadata.base_labels.allow_scoped_access = true

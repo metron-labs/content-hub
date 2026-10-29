@@ -40,6 +40,8 @@ DEFAULT_ROUTES: list[tuple[str, str, str]] = [
     ("GET", r"^/events/ai-assistance$", "event_ai_insights.json"),
     ("GET", r"^/events/explain-identifier$", "explain_identifier_match.json"),
     ("POST", r"^/firework/v4/events/actions$", "event_action.json"),
+    ("POST", r"^/events/credential-actions$", "credential_action.json"),
+    ("PATCH", r"^/events/tenant-metadata$", "tenant_metadata.json"),
     ("POST", r"^/global/_search$", "global_search.json"),
     ("GET", r"^/global/_search/quota$", "global_search_quota.json"),
     ("GET", r"^/firework/v4/identifiers/$", "identifiers_list.json"),
@@ -49,6 +51,7 @@ DEFAULT_ROUTES: list[tuple[str, str, str]] = [
     ("GET", r"^/firework/v4/alerts/$", "alerts_list.json"),
     ("GET", r"^/firework/v4/alerts/[^/]+$", "alert_details.json"),
     ("POST", r"^/entities/_list$", "entities_list.json"),
+    ("POST", r"^/entities/relations$", "entity_relations.json"),
     ("GET", r"^/entities/[^/]+$", "entity_details.json"),
 ]
 

@@ -183,11 +183,19 @@ def _safe_json(value: Any) -> str:
         return str(value)
 
 
-def build_event_dict(event: dict, start_time: int, end_time: int) -> dict:
-    """Flat SOAR event payload for AlertInfo.events."""
-    meta = _metadata(event)
+def build_event_dict(
+    event: dict,
+    start_time: int,
+    end_time: int,
+    tenant_id: Any = None,
+) -> dict:
+    """Flat SOAR event payload for AlertInfo.events.
+
+    ``tenant_id`` is the tenant the connector fetched this event for. Flare
+    event metadata does not carry it, so the packaged event uses this value.
+    """
     uid = _uid(event)
-    source_type = _source_type(event)
+    event_type = _source_type(event)
     severity = _severity(event)
     payload = {
         "StartTime": start_time,
@@ -195,20 +203,18 @@ def build_event_dict(event: dict, start_time: int, end_time: int) -> dict:
         "name": _title(event),
         "device_vendor": VENDOR_NAME,
         "device_product": DEVICE_PRODUCT,
-        # product_log_id / event_class_id: CaseFullDetails exposes the Flare
-        # uid on security_events.event_class_id after ingestion.
+        # product_log_id / event_class_id / flare_uid stay the Flare UID so
+        # closed-case remediation can still find the event. The connector
+        # EventClassId setting points at event_type, which is the category.
         "product_log_id": uid,
         "flare_uid": uid,
         "event_class_id": uid,
-        "DeviceEventClassID": uid,
+        "DeviceEventClassID": event_type,
         "Severity": severity,
-        "source_type": source_type,
-        "source_type_display": TYPE_DISPLAY_NAME.get(
-            source_type, source_type.replace("_", " ").title()
-        ),
+        "event_type": event_type,
         "flare_url": _flare_url(event),
         "estimated_created_at": _timestamp(event),
-        "tenant_id": str(meta.get("tenant_id") or ""),
+        "tenant_id": str(tenant_id if tenant_id not in (None, "") else ""),
         "details": _safe_json(event),
     }
     host = _destination_host(event)
@@ -260,11 +266,11 @@ def create_alerts(
         alert.display_id = f"{VENDOR_NAME}:{finding_key}"
         alert.ticket_id = alert_id
         # Stable rule_generator so closed-case ticket lookup finds Flare alerts.
-        alert.rule_generator = VENDOR_NAME
+        alert.rule_generator = VENDOR_NAME+"test-3"
         alert.device_event_class_id = alert_id
         alert.name = _title(event)
         # Grouping key is the monitored hostname from identifiers[].name.
-        # Source type remains on the event as source_type when no host exists.
+        # Event type remains on the event as event_type when no host exists.
         grouping_key = _destination_host(event) or source_type
         alert.source_grouping_identifier = grouping_key
         alert.sourceGroupIdentifier = grouping_key
@@ -278,7 +284,7 @@ def create_alerts(
             f"1 Flare threat exposure finding of type {source_type}."
         )
         alert.case_tags = [VENDOR_NAME, source_type, display_type]
-        alert.events = [build_event_dict(event, event_time, event_time)]
+        alert.events = [build_event_dict(event, event_time, event_time, tenant_id)]
         alert.extensions = {
             "SourceType": source_type,
             "SourceTypeDisplay": display_type,

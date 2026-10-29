@@ -98,8 +98,8 @@ def _extract_uids_from_event(event: Any, found: set) -> None:
         if meta.get("flare_url"):
             _uid_from_flare_url(meta.get("flare_url"), found)
 
-    # CaseFullDetails (cyber_alerts.security_events) keeps the Flare uid in
-    # event_class_id. Connector events also set product_log_id / flare_uid.
+    # CaseFullDetails keeps the Flare uid in event_class_id.
+    # DeviceEventClassID is the event category (event_type), not the uid.
     for key in (
         "product_log_id",
         "productLogId",
@@ -107,8 +107,6 @@ def _extract_uids_from_event(event: Any, found: set) -> None:
         "flareUid",
         "event_class_id",
         "EventClassId",
-        "device_event_class_id",
-        "DeviceEventClassID",
     ):
         if key in event:
             _add_uid_string(event.get(key), found)
@@ -324,7 +322,7 @@ class SoarRemediator:
         self,
         flare_manager,
         siemplify,
-        rule_generator: str = VENDOR_NAME,
+        rule_generator: str = VENDOR_NAME+"Flare-test-2",
         state: Optional[dict] = None,
         logger_instance=None,
     ) -> None:

@@ -14,3 +14,13 @@
     regressive: false
     deprecated: false
     removed: false
+-   description: Added Execute Credential Action, Update Tenant Metadata, and List Entity Relations.
+    version: 2.1
+    item_name: Flare
+    item_type: Integration
+    publish_time: '2026-10-29'
+    ticket_number: No ticket
+    new: false
+    regressive: false
+    deprecated: false
+    removed: false

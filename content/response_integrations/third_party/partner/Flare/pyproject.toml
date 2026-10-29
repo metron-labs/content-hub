@@ -1,6 +1,6 @@
 [project]
 name = "Flare"
-version = "2.0"
+version = "2.1"
 description = "Flare integration for Google SecOps. Connects Flare's threat exposure findings with Google SecOps so security teams can ingest dark-web, credential, and exposure alerts into SOAR cases and remediate directly from playbooks. Optional auto-remediation syncs closed SOAR Flare cases back to Flare using a timestamp checkpoint (no Google service account). In case of any queries, please reach out to support."
 requires-python = ">=3.11,<3.12"
 dependencies = [

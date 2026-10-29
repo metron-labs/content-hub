@@ -37,7 +37,7 @@ The connector can ingest all configured tenants. Each action runs against one te
 - List actions accept **Max Records To Return** (1–1000, default 50). Search-style results page with a cursor. Identifier, alert, and entity lists page with `limit` and `offset`.
 - Calls are paced to Flare's organization limits (4 requests/second for basic calls, 1 request/second for search). HTTP 429 is retried after the wait Flare recommends. HTTP 401 refreshes the token once.
 
-Two actions change data in Flare: **Execute Event Action** and **Set Identifier Status**.
+Four actions change data in Flare: **Execute Event Action**, **Execute Credential Action**, **Update Tenant Metadata**, and **Set Identifier Status**.
 
 Endpoint paths follow the Flare Actions API list. Confirm them against the current Flare API reference before production use. Paths are defined in `core/constants.py`.
 
@@ -51,9 +51,15 @@ Endpoint paths follow the Flare Actions API list. Confirm them against the curre
 | Get Event Field Details | `GET /events/v2/expand` | Event UID, Field Path |
 | Get Event AI Insights | `GET /events/ai-assistance` | Event UID |
 | Execute Event Action | `POST /firework/v4/events/actions` | Action Type (`remediate`, `ignore`, `unignore`), Event UIDs (comma-separated, maximum 10) |
+| Execute Credential Action | `POST /events/credential-actions` | Action Type, Credential IDs (comma-separated) |
+| Update Tenant Metadata | `PATCH /events/tenant-metadata` | Event UID, and at least one of Severity, Tags, Notes |
 | Explain Identifier Match | `GET /events/explain-identifier` | Event UID, Identifier ID |
 
 Execute Event Action sends `{"action": {"type": "..."}, "targets": [{"uid": "..."}]}`.
+
+Execute Credential Action sends `{"action": {"type": "..."}, "credential_ids": ["..."]}`.
+
+Update Tenant Metadata sends only the fields you fill. The event is selected with `uid`. Severity must be `info`, `low`, `medium`, `high`, or `critical`.
 
 ### Global search
 
@@ -90,6 +96,7 @@ These are Flare alert rules, not Google SecOps alerts.
 | --- | --- | --- |
 | List Entities | `POST /entities/_list` | Entity Type, Query, Max Records To Return |
 | Get Entity Details | `GET /entities/{entity_id}` | Entity ID |
+| List Entity Relations | `POST /entities/relations` | Entity ID, Relation Types, Max Records To Return |
 
 List Entities sends the resolved tenant ID in the request body. There is no separate tenant parameter for the Flare API.
 

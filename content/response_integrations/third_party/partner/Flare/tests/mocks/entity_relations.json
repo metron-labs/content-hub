@@ -1,0 +1,9 @@
+{
+  "items": [
+    {
+      "entity_id": "e-1",
+      "relation_type": "malware",
+      "related_entity_id": "mal-1"
+    }
+  ]
+}

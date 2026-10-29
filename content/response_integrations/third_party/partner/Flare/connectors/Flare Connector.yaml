@@ -67,10 +67,10 @@ parameters:
     is_advanced: false
     mode: regular
 -   name: EventClassId
-    default_value: flare_uid
+    default_value: event_type
     type: string
     description: Platform Event Field Name (required by SecOps). Field used for event
-        class / mapping (flare_uid).
+        class / mapping (event_type, for example listing or leaked_credential).
     is_mandatory: true
     is_advanced: false
     mode: regular
