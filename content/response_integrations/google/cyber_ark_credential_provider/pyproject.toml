@@ -17,7 +17,7 @@ name = "CyberArkCredentialProvider"
 version = "6.0"
 description = "CyberArk's Secrets Manager Credential Providers, part of the Privileged Access Security solution, is used to eliminate hard coded application credentials embedded in applications, scripts or configuration files, and allows these highly-sensitive passwords to be centrally stored, logged and managed within the Vault."
 requires-python = ">=3.11,<3.12"
-dependencies = [ "environmentcommon", "paramiko==3.5.1", "tipcommon",]
+dependencies = [ "environmentcommon", "paramiko==5.0.0", "tipcommon",]
 
 [dependency-groups]
 dev = [ "integration-testing", "pytest>=9.2.0", "pytest-json-report>=1.5.0", "pytest-mock>=3.16.0", "soar-sdk",]
