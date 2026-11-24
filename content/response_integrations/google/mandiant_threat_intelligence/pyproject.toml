@@ -17,7 +17,7 @@ name = "MandiantThreatIntelligence"
 version = "19.0"
 description = "Mandiant Threat Intelligence is on a mission to make every organization secure from cyber threats and confident in their readiness. Mandiant delivers dynamic cyber defense solutions powered by industry-leading expertise, intelligence and innovative technology."
 requires-python = ">=3.11,<3.12"
-dependencies = [ "requests==2.32.4", "tipcommon",]
+dependencies = [ "requests==2.33.0", "tipcommon",]
 
 [dependency-groups]
 dev = [ "pytest>=9.1.1", "pytest-json-report>=1.5.0", "soar-sdk",]
